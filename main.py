@@ -29,6 +29,9 @@ def setup_logging():
     console.setFormatter(fmt)
     console.setLevel(logging.DEBUG)
 
+    # 抑制 comtypes 的 DEBUG 日志
+    logging.getLogger("comtypes").setLevel(logging.WARNING)
+
     from logging.handlers import TimedRotatingFileHandler
     file_handler = TimedRotatingFileHandler(
         "logs/bot.log", when="midnight", backupCount=7, encoding="utf-8"
@@ -98,11 +101,11 @@ def main():
     state.running = True
 
     logger.info("=" * 50)
-    logger.info("✅ 机器人已启动（纯 UIA 模式）")
-    logger.info("   Web 面板: http://127.0.0.1:8766")
-    logger.info("   请确保微信窗口可见（不要最小化到托盘）")
-    logger.info("   在群里 @%s 即可对话", config.bot.name)
-    logger.info("   按 Ctrl+C 退出")
+    logger.info("Bot started (UIA mode)")
+    logger.info("   Web panel: http://127.0.0.1:8766")
+    logger.info("   Keep WeChat window visible")
+    logger.info("   @%s in group to chat", config.bot.name)
+    logger.info("   Ctrl+C to exit")
     logger.info("=" * 50)
 
     try:

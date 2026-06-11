@@ -1,24 +1,25 @@
 """
-UIA 消息接收器 — 通过轮询微信 4.x 窗口的聊天列表，检测并读取新消息。
-不依赖 WeFlow、不依赖 DLL 注入，纯 UIA 实现。
+UIA 消息接收器 v2 — 借鉴 wxauto 思路。
+1. 轮询聊天列表，检测红点/未读标记
+2. 点进有消息的聊天 → 读取消息列表 → 提取文本
+3. 适配微信 4.x Qt 版
 """
 import logging
 import re
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class UiaMessage:
-    """UIA 接收到的一条消息。"""
     content: str
-    session_name: str       # 群名或联系人名
-    session_type: str       # "group" 或 "private"
-    sender_name: str        # 群内发送者名（群聊时有值）
+    session_name: str
+    session_type: str  # "group" / "private"
+    sender_name: str
     timestamp: int = 0
 
     @property
@@ -31,71 +32,57 @@ class UiaMessage:
 
 
 class UiaReceiver:
-    """
-    微信 4.x 消息接收器。
+    """微信 4.x 消息接收器（轮询版）。"""
 
-    原理：
-    1. 定位微信主窗口
-    2. 双击「聊天」图标回到聊天列表
-    3. 遍历聊天列表，检测红点/数字标记判断是否有新消息
-    4. 点击有消息的会话 → 读取消息列表 → 提取最新消息
-    5. 解析消息内容（支持群聊 @ 和普通文本）
-    """
-
-    # 微信窗口的候选 ClassName（Qt 版 4.x 和 Electron 版 4.x）
-    WINDOW_CLASSES = ["Qt51514QWindowIcon", "CefTopWindow", "Chrome_WidgetWin_0"]
-
-    def __init__(self, poll_interval: float = 1.0):
+    def __init__(self, poll_interval: float = 2.0):
         self.poll_interval = poll_interval
         self._auto = None
         self._window = None
         self._running = False
         self._callback: Optional[Callable[[UiaMessage], None]] = None
-        self._seen: set = set()  # 已处理的消息去重
+        self._seen: set = set()
+        self._last_chat = ""
 
     # ----------------------------------------------------------------
     # 初始化
     # ----------------------------------------------------------------
     def _init_uia(self) -> bool:
-        """初始化 UIA 并定位微信窗口。"""
-        try:
-            import uiautomation as auto
-            self._auto = auto
-        except ImportError:
-            logger.error("请安装 uiautomation: pip install uiautomation")
-            return False
+        import uiautomation as auto
+        self._auto = auto
 
         root = auto.GetRootControl()
         for w in root.GetChildren():
-            name = w.Name or ""
-            if "微信" in name or "WeChat" in name:
-                self._window = w
-                logger.info("找到微信窗口: '%s' (ClassName=%s)", name, w.ClassName)
-                return True
+            cls = w.ClassName
+            if cls in ("Chrome_WidgetWin_1", "CabinetWClass"):
+                continue
+            for kw in ("微信", "WeChat"):
+                if kw in w.Name:
+                    self._window = w
+                    logger.info("找到微信: '%s' (cls=%s)", w.Name, cls)
+                    return True
 
-        # 尝试按 ClassName 找
-        for cls in self.WINDOW_CLASSES:
+        # 按类名找
+        for cls in ("Qt51514QWindowIcon", "CefTopWindow"):
             try:
                 w = auto.WindowControl(ClassName=cls, searchDepth=1)
                 if w.Exists(1):
                     self._window = w
-                    logger.info("找到微信窗口: ClassName=%s", cls)
+                    logger.info("找到微信: cls=%s", cls)
                     return True
             except Exception:
                 pass
-
-        logger.error("未找到微信窗口，请确认微信已登录且窗口可见")
         return False
 
     # ----------------------------------------------------------------
-    # 启动轮询
+    # 启动
     # ----------------------------------------------------------------
     def start(self) -> None:
         if not self._init_uia():
+            logger.error("未找到微信窗口")
             return
         self._running = True
         threading.Thread(target=self._poll_loop, daemon=True, name="uia-recv").start()
-        logger.info("UIA 接收器已启动，轮询间隔 %.1fs", self.poll_interval)
+        logger.info("UIA 接收器已启动")
 
     def on_message(self, callback: Callable[[UiaMessage], None]) -> None:
         self._callback = callback
@@ -104,134 +91,94 @@ class UiaReceiver:
         self._running = False
 
     # ----------------------------------------------------------------
-    # 轮询主循环
+    # 轮询
     # ----------------------------------------------------------------
     def _poll_loop(self) -> None:
         while self._running:
             try:
-                self._check_for_new_messages()
+                self._poll_once()
             except Exception:
                 logger.exception("轮询异常")
             time.sleep(self.poll_interval)
 
-    def _check_for_new_messages(self) -> None:
-        """检查是否有新消息（简化版：只看当前聊天窗口）。"""
+    def _poll_once(self) -> None:
+        """检查聊天列表中的未读标记，点进去读消息。"""
         if not self._window or not self._window.Exists(0.5):
             self._init_uia()
             return
 
-        try:
-            # 获取当前聊天窗口的消息列表
-            chat_name = self._get_current_chat_name()
-            if not chat_name:
-                return
+        # 获取有未读/新消息的 session 列表
+        sessions = self._get_sessions_with_unread()
+        if not sessions:
+            return
 
-            messages = self._read_chat_messages()
-            if not messages:
-                return
+        for session_name, unread_count in sessions.items():
+            if unread_count <= 0:
+                continue
 
-            # 处理新消息
-            for msg_text in messages:
-                msg_key = f"{chat_name}|{msg_text[:100]}"
-                if msg_key in self._seen:
-                    continue
-                self._seen.add(msg_key)
-                if len(self._seen) > 1000:
-                    self._seen = set(list(self._seen)[-500:])
+            logger.info("检测到新消息: %s (%d条)", session_name, unread_count)
 
-                # 判断是群聊还是私聊
-                is_group = self._is_group_chat()
+            # 切换到该聊天
+            if self._switch_to_chat(session_name):
+                time.sleep(0.5)
+                # 读取消息
+                msgs = self._read_messages()
+                for m in msgs:
+                    key = f"{session_name}|{m[:80]}"
+                    if key in self._seen:
+                        continue
+                    self._seen.add(key)
+                    if len(self._seen) > 2000:
+                        self._seen = set(list(self._seen)[-1000:])
 
-                # 群聊解析发送者
-                sender = ""
-                if is_group:
-                    sender = self._parse_group_sender(msg_text)
+                    sender = self._parse_sender(m)
+                    content = m
                     if sender:
-                        content = msg_text[len(sender):].lstrip(":").lstrip("：").strip()
-                    else:
-                        content = msg_text
-                else:
-                    content = msg_text
+                        content = m[len(sender):].lstrip(":").lstrip("：").strip()
 
-                if self._callback:
-                    msg = UiaMessage(
-                        content=content,
-                        session_name=chat_name,
-                        session_type="group" if is_group else "private",
-                        sender_name=sender,
-                    )
-                    self._callback(msg)
+                    if self._callback:
+                        self._callback(UiaMessage(
+                            content=content,
+                            session_name=session_name,
+                            session_type="group" if self._is_group() else "private",
+                            sender_name=sender,
+                        ))
 
-        except Exception:
-            pass
+            # 回聊天列表
+            self._go_to_chat_list()
+            time.sleep(0.5)
 
     # ----------------------------------------------------------------
-    # UIA 窗口操作
+    # UIA 操作
     # ----------------------------------------------------------------
-    def _get_current_chat_name(self) -> Optional[str]:
-        """获取当前聊天窗口的会话名称。"""
+    def _get_sessions_with_unread(self) -> Dict[str, int]:
+        """遍历聊天列表，提取有未读标记的会话名和未读数。"""
+        result = {}
         try:
-            # 微信 4.x 聊天标题在窗口顶部某个 TextControl 中
-            for ctrl, _ in self._auto.WalkTree(self._window, lambda c: True, maxDepth=8):
-                if ctrl.ControlTypeName == "TextControl":
-                    name = ctrl.Name or ""
-                    # 聊天标题通常较短，不会是长文本
-                    if 2 <= len(name) <= 40 and "微信" not in name:
-                        return name
-        except Exception:
-            pass
-        return None
-
-    def _is_group_chat(self) -> bool:
-        """判断当前聊天是否为群聊。"""
-        try:
-            # 群聊窗口中通常有「群成员」相关的控件
+            # 遍历所有 ListItem 控件，找到含"条新消息"的
             for ctrl, _ in self._auto.WalkTree(self._window, lambda c: True, maxDepth=10):
                 name = ctrl.Name or ""
-                if "群成员" in name or "成员" in name or "群聊" in name:
-                    return True
+                if "条新消息" in name:
+                    # 格式如 "群名\n联系人名\nX条新消息\n内容预览"
+                    parts = name.split("\n")
+                    for p in parts:
+                        match = re.search(r'(\d+)条新消息', p)
+                        if match:
+                            count = int(match.group(1))
+                            # 取前面的名字
+                            idx = parts.index(p)
+                            if idx > 0:
+                                result[parts[idx - 1].strip()] = count
+                            break
         except Exception:
             pass
-        return False
+        return result
 
-    def _read_chat_messages(self) -> list:
-        """读取当前聊天窗口的最新消息文本列表。"""
-        messages = []
-        try:
-            for ctrl, _ in self._auto.WalkTree(self._window, lambda c: True, maxDepth=12):
-                if ctrl.ControlTypeName == "ListItemControl":
-                    name = ctrl.Name or ""
-                    if name and len(name) > 1:
-                        # 过滤掉纯数字时间戳、系统提示等
-                        if not re.match(r'^\d{1,2}:\d{2}$', name):
-                            messages.append(name)
-        except Exception:
-            pass
-
-        # 取最后几条（最新的消息在列表底部）
-        return messages[-20:] if len(messages) > 20 else messages
-
-    def _parse_group_sender(self, text: str) -> str:
-        """尝试从群聊消息文本中解析发送者名称。
-        微信 4.x 群聊消息格式通常是 "发送者名：消息内容" 或 "发送者名: 消息内容"。
-        """
-        match = re.match(r'^([^：:]{1,20})[：:]', text)
-        if match:
-            return match.group(1)
-        return ""
-
-    # ----------------------------------------------------------------
-    # 发送辅助（直接在这里暴露，方便外部调用）
-    # ----------------------------------------------------------------
-    def switch_to_chat(self, name: str) -> bool:
-        """切换到指定聊天会话。使用 Ctrl+F 搜索。"""
+    def _switch_to_chat(self, name: str) -> bool:
+        """Ctrl+F 搜索 + 跳转到指定聊天。"""
         try:
             import ctypes
-            hwnd = None
-            for cls in self.WINDOW_CLASSES:
-                hwnd = ctypes.windll.user32.FindWindowW(cls, None)
-                if hwnd:
-                    break
+            hwnd = ctypes.windll.user32.FindWindowW('Qt51514QWindowIcon', None)
             if not hwnd:
                 return False
 
@@ -242,7 +189,6 @@ class UiaReceiver:
             ctypes.windll.user32.keybd_event(0x11, 0, 2, 0)
             time.sleep(0.3)
 
-            # 粘贴名称
             import pyperclip
             pyperclip.copy(name)
             time.sleep(0.1)
@@ -252,11 +198,48 @@ class UiaReceiver:
             ctypes.windll.user32.keybd_event(0x11, 0, 2, 0)
             time.sleep(0.3)
 
-            # Enter
             ctypes.windll.user32.keybd_event(0x0D, 0, 0, 0)
             ctypes.windll.user32.keybd_event(0x0D, 0, 2, 0)
-            time.sleep(0.5)
+            time.sleep(0.8)
 
+            self._last_chat = name
             return True
         except Exception:
             return False
+
+    def _go_to_chat_list(self) -> None:
+        """回到聊天列表（按 Esc）。"""
+        try:
+            import ctypes
+            ctypes.windll.user32.keybd_event(0x1B, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0x1B, 0, 2, 0)
+        except Exception:
+            pass
+
+    def _read_messages(self) -> List[str]:
+        """读取当前窗口消息内容。"""
+        msgs = []
+        try:
+            for ctrl, _ in self._auto.WalkTree(self._window, lambda c: True, maxDepth=12):
+                ct = ctrl.ControlTypeName
+                name = (ctrl.Name or "").strip()
+                if ct in ("TextControl", "ListItemControl") and len(name) > 2:
+                    if not re.match(r'^\d{1,2}:\d{2}$', name) and "微信" not in name:
+                        msgs.append(name)
+        except Exception:
+            pass
+        # 返回最近 20 条
+        return msgs[-20:] if len(msgs) > 20 else msgs
+
+    def _is_group(self) -> bool:
+        try:
+            for ctrl, _ in self._auto.WalkTree(self._window, lambda c: True, maxDepth=10):
+                if ("群成员" in (ctrl.Name or "")) or ("成员" in (ctrl.Name or "") and "群" in (ctrl.Name or "")):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _parse_sender(self, text: str) -> str:
+        m = re.match(r'^([^：:]{1,20})[：:]', text)
+        return m.group(1) if m else ""
