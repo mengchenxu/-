@@ -35,3 +35,6 @@ groups:
 # --- 会话管理 ---
 session:
   max_history_rounds: 10        # 每个群最多保留多少轮对话
+
+# --- WeFlow 配置 ---
+weflow_token: ""               # WeFlow API 服务 token（可选，留空不使用）

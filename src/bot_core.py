@@ -7,8 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
-from wcferry import WxMsg
-
+from src.weflow_client import WeFlowMessage
 from src.config_loader import AppConfig
 
 logger = logging.getLogger(__name__)
@@ -37,9 +36,9 @@ class BotCore:
     3. 多群会话隔离 — 每个群独立维护对话历史
     """
 
-    def __init__(self, config: AppConfig, wcf_client):
+    def __init__(self, config: AppConfig, weflow_client):
         self.config = config
-        self.wcf = wcf_client
+        self.client = weflow_client
         self.bot_name = config.bot.name
         self.cooldown = config.bot.reply_cooldown_seconds
         # 群会话: {group_id: GroupSession}
@@ -48,21 +47,20 @@ class BotCore:
     # ----------------------------------------------------------------
     # 入口：处理一条消息，返回要不要回复 + 回复内容
     # ----------------------------------------------------------------
-    def handle(self, msg: WxMsg) -> Optional[Tuple[str, str]]:
+    def handle(self, msg: WeFlowMessage) -> Optional[Tuple[str, str]]:
         """
         处理消息。返回 (reply_text, roomid) 或 None。
         None 表示无需回复。
         """
 
         # ---- 1. 仅群聊 ----
-        if not msg.from_group():
+        if not msg.is_group:
             return None
 
         roomid = msg.roomid
-        group_name = msg.sender  # 发送者昵称解析（实际需从联系人获取）
 
         # ---- 2. 群过滤（白名单/黑名单） ----
-        if not self._group_allowed(roomid):
+        if not self._group_allowed(msg.roomid):
             return None
 
         # ---- 3. @bot 检测 ----
@@ -106,20 +104,15 @@ class BotCore:
     # ----------------------------------------------------------------
     # 内部方法
     # ----------------------------------------------------------------
-    def _is_at_bot(self, msg: WxMsg) -> bool:
-        """判断消息是否 @了机器人。"""
-        # WxMsg 的 is_at 属性或检查 xml 中的 @ 标记
-        if hasattr(msg, "is_at") and msg.is_at:
-            return True
-        # 兜底：检查内容是否包含 bot 名字
+    def _is_at_bot(self, msg: WeFlowMessage) -> bool:
+        """判断消息是否 @了机器人（WeFlow 基于内容检测）。"""
         if self.bot_name in msg.content:
             return True
         return False
 
-    def _clean_at_text(self, msg: WxMsg) -> str:
+    def _clean_at_text(self, msg: WeFlowMessage) -> str:
         """去掉 @bot 部分，返回干净的用户问题。"""
         text = msg.content.strip()
-        # 去除 "@xxx\u2005" 模式
         import re
         text = re.sub(r"@[^\s]+\s*", "", text).strip()
         return text

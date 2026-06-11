@@ -42,6 +42,7 @@ class AppConfig:
     bot: BotConfig = field(default_factory=BotConfig)
     groups: GroupConfig = field(default_factory=GroupConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    weflow_token: str = ""
 
 
 def load_config(path: str = "config/config.yaml") -> AppConfig:

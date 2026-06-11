@@ -1,15 +1,13 @@
 """
-群聊 AI 机器人 — 入口
+群聊 AI 机器人 — 入口（WeFlow + UIA 版）
 用法: python main.py
 """
 import logging
 import sys
 import time
 
-from wcferry import WxMsg
-
 from src.config_loader import load_config
-from src.wcf_client import WcfClient
+from src.weflow_client import WeFlowClient, WeFlowMessage
 from src.bot_core import BotCore
 from src.llm_client import LLMClient
 
@@ -20,12 +18,10 @@ def setup_logging():
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    # 控制台
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(fmt)
     console.setLevel(logging.DEBUG)
 
-    # 文件
     from logging.handlers import TimedRotatingFileHandler
     file_handler = TimedRotatingFileHandler(
         "logs/bot.log", when="midnight", backupCount=7, encoding="utf-8"
@@ -45,20 +41,18 @@ def main():
 
     # 1. 加载配置
     config = load_config()
-    logger.info("配置加载完成: llm.provider=%s, llm.model=%s", config.llm.provider, config.llm.model)
+    logger.info("配置加载完成: llm=%s/%s, bot=%s", config.llm.provider, config.llm.model, config.bot.name)
 
     # 2. 初始化各模块
-    wcf = WcfClient()
-    wcf.login()
-
     llm = LLMClient(config)
-    bot = BotCore(config, wcf)
+    weflow = WeFlowClient(config)
+    bot = BotCore(config, weflow)
 
     # 3. 注册消息回调
-    def on_msg(msg: WxMsg):
+    def on_msg(msg: WeFlowMessage):
         logger.debug(
-            "消息: type=%s, sender=%s, roomid=%s, content=%s",
-            msg.type, msg.sender, msg.roomid, msg.content,
+            "消息: session=%s, sender=%s, content=%s",
+            msg.session_id, msg.sender_name, msg.content[:80],
         )
 
         # BotCore 处理：过滤 + 命令
@@ -66,32 +60,38 @@ def main():
         if cmd_result is not None:
             reply_text, roomid = cmd_result
             logger.info("命令回复: roomid=%s, reply=%s", roomid, reply_text[:50])
-            wcf.send_text(reply_text, roomid, msg.sender)
+            weflow.send_text(reply_text, roomid, msg.sender_name)
             return
 
         # 需要 LLM 处理的消息
-        if msg.from_group() and bot._is_at_bot(msg):
+        if msg.is_group and bot._is_at_bot(msg):
             roomid = msg.roomid
             history = bot.get_history(roomid)
-            logger.info("LLM 请求: roomid=%s, history_rounds=%d", roomid, len(history) // 2)
+            logger.info("LLM 请求: roomid=%s, rounds=%d", roomid, len(history) // 2)
 
             reply = llm.chat(history)
             bot.add_reply(roomid, reply)
 
-            wcf.send_text(reply, roomid, msg.sender)
-            logger.info("LLM 回复: roomid=%s, reply=%s", roomid, reply[:50])
+            success = weflow.send_text(reply, roomid, msg.sender_name)
+            if success:
+                logger.info("回复成功: roomid=%s, reply=%s", roomid, reply[:50])
+            else:
+                logger.warning("回复失败: roomid=%s", roomid)
 
-    wcf.on_message(on_msg)
-    wcf.enable_receiving()
+    weflow.on_message(on_msg)
+    weflow.start_receiving()
 
-    logger.info("✅ 机器人已启动，按 Ctrl+C 退出")
+    logger.info("✅ 机器人已启动（WeFlow + UIA 模式）")
+    logger.info("   确保已启动 WeFlow 并开启 API 服务（端口 5031）")
+    logger.info("   按 Ctrl+C 退出")
+
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("收到退出信号")
     finally:
-        wcf.stop()
+        weflow.stop()
 
 
 if __name__ == "__main__":
