@@ -1,0 +1,37 @@
+# ============================================================
+#  群聊 AI 机器人 — 配置文件模板
+#  复制为 config/config.yaml 并填入真实值
+# ============================================================
+
+# --- LLM 配置 ---
+llm:
+  provider: "deepseek"          # deepseek | openai | doubao | custom
+  api_key: "sk-your-key-here"
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-chat"
+  max_tokens: 1024
+  temperature: 0.7
+
+# --- System Prompt ---
+bot:
+  name: "小助手"
+  system_prompt: |
+    你是一个微信群聊里的 AI 助手，名叫"小助手"。请遵守以下规则：
+    1. 回复简洁，控制在 200 字以内
+    2. 语气友好、有亲和力
+    3. 不要提及你是 AI 或模型
+    4. 如果不知道，直接说不知道，不要编造
+    5. 使用中文回复
+
+  # 回复间隔：每个群两次回复之间至少间隔 N 秒（防刷屏）
+  reply_cooldown_seconds: 3
+
+# --- 群聊过滤 ---
+groups:
+  # 白名单模式：只响应这些群（为空则响应所有群）
+  whitelist: []
+  #  blacklist: ["群名1", "群名2"]  # 备用：也可以单独黑名单
+
+# --- 会话管理 ---
+session:
+  max_history_rounds: 10        # 每个群最多保留多少轮对话
