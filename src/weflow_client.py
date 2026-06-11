@@ -1,18 +1,14 @@
 """
-WeFlow 接入层 — 通过 WeFlow SSE 接收微信消息，UIA 自动化发送消息。
-替换原来的 wcf_client.py，支持微信 4.x。
+WeFlow 接入层 — SSE 实时收消息 + 消息缓冲 + UIA 发送。
 """
 import json
 import logging
-import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Dict, Any
+from typing import Callable, Optional, Dict, Any, Tuple
 
 import requests
-
-from src.config_loader import AppConfig
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +16,15 @@ logger = logging.getLogger(__name__)
 @dataclass
 class WeFlowMessage:
     """从 WeFlow SSE 解析出的消息对象。"""
-    rawid: str            # 消息唯一 ID（去重用）
-    content: str          # 消息文本内容
-    session_id: str       # 群 ID（xxx@chatroom）或私聊对方 wxid
-    session_type: str     # "group" 或空（私聊）
-    group_name: str       # 群名称
-    sender_name: str      # 发送者名称
-    talker_id: str        # 发送者 wxid
-    timestamp: int        # 消息时间戳
-    raw: dict = field(default_factory=dict)  # 原始数据
+    rawid: str
+    content: str
+    session_id: str
+    session_type: str
+    group_name: str
+    sender_name: str
+    talker_id: str
+    timestamp: int
+    raw: dict = field(default_factory=dict)
 
     @property
     def is_group(self) -> bool:
@@ -39,48 +35,86 @@ class WeFlowMessage:
         return self.session_id
 
 
+class MessageBuffer:
+    """消息缓冲器：收集 N 秒内的消息，合并后推送给 LLM。"""
+
+    def __init__(self, buffer_seconds: float = 2.0, callback: Optional[Callable] = None):
+        self.buffer_seconds = buffer_seconds
+        self.callback = callback
+        self._buffer: Dict[str, list] = {}  # {session_id: [WeFlowMessage]}
+        self._timer: Optional[threading.Timer] = None
+        self._lock = threading.Lock()
+
+    def add(self, msg: WeFlowMessage, at_sender: str = "") -> None:
+        """添加消息到缓冲。"""
+        with self._lock:
+            key = msg.session_id
+            if key not in self._buffer:
+                self._buffer[key] = []
+            self._buffer[key].append(msg)
+
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(self.buffer_seconds, self._flush)
+            self._timer.start()
+
+    def _flush(self) -> None:
+        """清空缓冲，调用回调。"""
+        with self._lock:
+            if not self._buffer:
+                return
+            for session_id, msgs in self._buffer.items():
+                if msgs and self.callback:
+                    # 合并成一条消息推送
+                    merged = "\n".join([m.content for m in msgs])
+                    self.callback(session_id, merged, msgs[0])
+            self._buffer.clear()
+            self._timer = None
+
+
 class WeFlowClient:
     """
-    替代原 WcfClient：
-    - 收消息：连接 WeFlow SSE (/api/v1/push/messages)
-    - 发消息：UIA 自动化（或 WeFlow API）
+    WeFlow + UIA 客户端：
+    - SSE 接收 WeFlow 消息推送
+    - 消息缓冲合并
+    - UIA 自动化发送
     """
 
-    def __init__(self, config: AppConfig):
-        self.config = config
-        self.base_url = "http://127.0.0.1:5031"
-        self.access_token = getattr(config, 'weflow_token', '') or ""
-
+    def __init__(self, base_url: str = "http://127.0.0.1:5031", access_token: str = ""):
+        self.base_url = base_url
+        self.access_token = access_token
         self._running = False
         self._callback: Optional[Callable[[WeFlowMessage], None]] = None
-        self._msg_queue: queue.Queue = queue.Queue()
         self._seen_rawids: set = set()
-
-        # UIA 发送器延迟初始化（只在需要时导入）
         self._uia_sender = None
+        self._buffer: Optional[MessageBuffer] = None
+        self.bot_nicknames: list = []
+        self.bot_wxid: str = ""
 
-    # ------------------------------------------------------------
-    # 消息接收 — SSE
-    # ------------------------------------------------------------
+    def set_bot_identity(self, nicknames: list, wxid: str = ""):
+        """设置机器人昵称列表和 wxid，用于自回过滤和 @ 检测。"""
+        self.bot_nicknames = nicknames
+        self.bot_wxid = wxid
+
+    # ----------------------------------------------------------------
+    # SSE 接收
+    # ----------------------------------------------------------------
     def start_receiving(self) -> None:
-        """连接 WeFlow SSE，在后台线程中接收消息。"""
         self._running = True
         threading.Thread(target=self._sse_loop, daemon=True, name="weflow-sse").start()
         logger.info("WeFlow SSE 接收线程已启动")
 
     def _sse_loop(self) -> None:
-        """SSE 长连接循环，自动重连。"""
         url = f"{self.base_url}/api/v1/push/messages"
         if self.access_token:
             url += f"?access_token={self.access_token}"
-
         start_ts = int(time.time() * 1000)
 
         while self._running:
             try:
-                logger.info("连接 WeFlow SSE: %s", url)
+                logger.info("连接 WeFlow SSE: %s", url[:60])
                 resp = requests.get(url, stream=True, timeout=300)
-                logger.info("SSE 连接成功，状态码: %d", resp.status_code)
+                logger.info("SSE 连接成功: %d", resp.status_code)
 
                 for line in resp.iter_lines(decode_unicode=True):
                     if not self._running:
@@ -88,7 +122,6 @@ class WeFlowClient:
                     if not line or not line.startswith("data:"):
                         continue
                     self._handle_sse_line(line, start_ts)
-
             except requests.exceptions.ConnectionError:
                 if self._running:
                     logger.warning("WeFlow 连接失败，5秒后重连...")
@@ -99,9 +132,8 @@ class WeFlowClient:
                     time.sleep(5)
 
     def _handle_sse_line(self, line: str, start_ts: int) -> None:
-        """解析单行 SSE 数据。"""
         try:
-            data_str = line[5:].strip()  # 去掉 "data:"
+            data_str = line[5:].strip()
             if not data_str:
                 return
             data = json.loads(data_str)
@@ -114,22 +146,28 @@ class WeFlowClient:
             if msg.rawid in self._seen_rawids:
                 return
             self._seen_rawids.add(msg.rawid)
-            # 限制去重集合大小
             if len(self._seen_rawids) > 50000:
                 self._seen_rawids = set(list(self._seen_rawids)[-10000:])
 
+            # 自回过滤
+            if self._is_self(msg):
+                return
+
             if self._callback:
                 self._callback(msg)
-
-        except json.JSONDecodeError:
-            pass
         except Exception:
-            logger.exception("SSE 消息解析异常")
+            logger.exception("SSE 解析异常")
 
     def _parse_message(self, data: dict) -> Optional[WeFlowMessage]:
-        """将 WeFlow API 返回的 JSON 转为 WeFlowMessage。"""
         content = data.get("content", "") or ""
         session_type = data.get("sessionType", "") or ""
+
+        # 跳过语音
+        msg_type = data.get("type") or data.get("msgType")
+        if msg_type == 34 or "[语音]" in content:
+            return None
+        if not content.strip():
+            return None
 
         return WeFlowMessage(
             rawid=data.get("rawid", "") or str(time.time()),
@@ -143,72 +181,46 @@ class WeFlowClient:
             raw=data,
         )
 
-    def on_message(self, callback: Callable[[WeFlowMessage], None]) -> None:
-        """注册消息回调。"""
-        self._callback = callback
-
-    # ------------------------------------------------------------
-    # 消息发送 — UIA 自动化
-    # ------------------------------------------------------------
-    def send_text(self, text: str, receiver: str, at_sender: str = "") -> bool:
-        """
-        发送文本消息到群聊。
-        - receiver: 群 ID（xxx@chatroom）或联系人名称
-        - at_sender: 要 @ 的人
-        """
-        if self._uia_sender is None:
-            self._init_uia_sender()
-
-        try:
-            # UIA 发送：先切到目标群，再发消息
-            if self._uia_sender:
-                self._uia_sender.send_text(receiver, text)
-                logger.info("UIA 发送成功: to=%s, text=%s", receiver, text[:50])
+    def _is_self(self, msg: WeFlowMessage) -> bool:
+        """判断是否为机器人自己的消息。"""
+        sender = msg.sender_name
+        if self.bot_wxid and self.bot_wxid in msg.talker_id:
+            return True
+        for nick in self.bot_nicknames:
+            if nick and nick in sender:
                 return True
-        except Exception:
-            logger.exception("UIA 发送失败，尝试 WeFlow API")
-
-        # 后备：WeFlow API 发送
-        return self._send_via_weflow_api(text, receiver)
-
-    def _send_via_weflow_api(self, text: str, receiver: str) -> bool:
-        """通过 WeFlow API 发送消息。"""
-        try:
-            url = f"{self.base_url}/api/v1/message"
-            headers = {"Content-Type": "application/json"}
-            if self.access_token:
-                headers["Authorization"] = f"Bearer {self.access_token}"
-            payload = {
-                "sessionId": receiver,
-                "content": text,
-            }
-            resp = requests.post(url, json=payload, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                logger.info("WeFlow API 发送成功: to=%s", receiver)
-                return True
-            else:
-                logger.warning("WeFlow API 发送失败: %d %s", resp.status_code, resp.text)
-        except Exception:
-            logger.exception("WeFlow API 发送异常")
         return False
 
-    # ------------------------------------------------------------
-    # UIA 发送器
-    # ------------------------------------------------------------
-    def _init_uia_sender(self) -> None:
-        """初始化 UIA 自动化发送器。"""
-        try:
-            from src.uia_sender import UiaSender
-            self._uia_sender = UiaSender()
-            logger.info("UIA 发送器初始化成功")
-        except Exception:
-            logger.exception("UIA 发送器初始化失败")
-            self._uia_sender = None
+    def is_at_bot(self, msg: WeFlowMessage) -> bool:
+        """检测是否 @ 了机器人（基于内容）。"""
+        for nick in self.bot_nicknames:
+            if nick and nick in msg.content:
+                return True
+        return False
 
-    # ------------------------------------------------------------
-    # 生命周期
-    # ------------------------------------------------------------
+    def on_message(self, callback: Callable[[WeFlowMessage], None]) -> None:
+        self._callback = callback
+
+    # ----------------------------------------------------------------
+    # 发送
+    # ----------------------------------------------------------------
+    def send_text(self, text: str, receiver: str, at_sender: str = "") -> bool:
+        """通过 UIA 发送文本消息。"""
+        if self._uia_sender is None:
+            try:
+                from src.uia_sender import UiaSender
+                self._uia_sender = UiaSender()
+                logger.info("UIA 发送器初始化成功")
+            except Exception:
+                logger.exception("UIA 发送器初始化失败")
+                return False
+
+        try:
+            return self._uia_sender.send_text(receiver, text)
+        except Exception:
+            logger.exception("UIA 发送失败")
+            return False
+
     def stop(self) -> None:
-        """停止 SSE 连接并清理。"""
         self._running = False
         logger.info("WeFlow 客户端已停止")

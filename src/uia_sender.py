@@ -1,172 +1,301 @@
 """
-UIA 发送器 — 通过 Windows UI Automation 控制微信窗口发送消息。
-适配微信 4.x (Electron 架构)。
+uia_sender.py — 基于 Windows UI Automation 的微信 4.0+ 消息发送器
+源于 Akasha-WeChat 项目的成熟实现。
+
+原理：
+  微信 4.0 基于 Electron (Chromium)。Chromium 通过 UIA 桥将 HTML 输入元素
+  暴露为标准 UIA 控件。通过 ValuePattern 设置输入框文本，InvokePattern 点击
+  发送按钮。全程无鼠标键盘模拟（降级模式下有），无 DLL 注入。
+
+工作流：
+  1. 定位微信窗口 (Electron/Chromium 或 Qt)
+  2. Ctrl+F 搜索联系人 → Enter → 切换到目标聊天
+  3. 定位聊天输入框 (EditControl + ValuePattern)
+  4. 设置文本 → 点击发送按钮或 Enter
 """
 import logging
+import os
+import subprocess
 import threading
 import time
 
-import pyperclip
-
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
 class UiaSender:
-    """通过 uiautomation 控制微信窗口，向指定联系人/群发送文本消息。"""
+    """Windows UI Automation 微信发送器。"""
 
-    def __init__(self):
-        import uiautomation as auto
-        self.auto = auto
+    WECHAT_TITLES = ["微信", "WeChat"]
+    EXCLUDE_CLASSES = ["Chrome_WidgetWin_1", "CabinetWClass"]
+
+    def __init__(self, search_enabled: bool = True):
         self._lock = threading.Lock()
-        self._window = self._find_window()
+        self._auto = None
+        self._ready = False
+        self._window = None
+        self._is_electron = False
+        self._input_control = None
+        self._send_button = None
+        self._last_contact = ""
+        self._use_coord_fallback = False
+        self.search_enabled = search_enabled
+        self._init()
 
-    # ------------------------------------------------------------
-    # 窗口定位
-    # ------------------------------------------------------------
+    def _init(self):
+        try:
+            import uiautomation as auto
+            self._auto = auto
+        except ImportError:
+            log.error("请先安装 uiautomation: pip install uiautomation")
+            return
+        log.info("正在搜索微信窗口...")
+        self._find_window()
+        if self._window:
+            log.info("微信窗口: '%s' ClassName=%s", self._window.Name, self._window.ClassName)
+            self._ready = True
+
     def _find_window(self):
-        """查找微信窗口。"""
-        auto = self.auto
-        for w in auto.GetRootControl().GetChildren():
-            name = w.Name or ""
-            if "微信" in name or "WeChat" in name:
-                logger.info("找到微信窗口: %s (ClassName=%s)", name, w.ClassName)
-                return w
-        logger.error("未找到微信窗口，请确认微信已登录")
-        return None
+        auto = self._auto
+        root = auto.GetRootControl()
+        for w in root.GetChildren():
+            cls = w.ClassName
+            if cls in self.EXCLUDE_CLASSES:
+                continue
+            for kw in self.WECHAT_TITLES:
+                if kw in w.Name:
+                    self._window = w
+                    if cls != "WeChatMainWndForPC":
+                        self._is_electron = True
+                    return
 
-    # ------------------------------------------------------------
-    # 联系人切换
-    # ------------------------------------------------------------
-    def _switch_contact(self, contact: str) -> bool:
-        """
-        通过 Ctrl+F 搜索框切换到目标联系人/群。
-        返回是否成功。
-        """
+    def _ensure_window(self) -> bool:
+        if not self._ready:
+            return False
+        if self._window and self._window.Exists(0.2):
+            return True
+        self._find_window()
         if not self._window:
+            log.warning("微信窗口未找到")
+            self._ready = False
             return False
+        return True
 
-        try:
-            with self._lock:
-                # 激活窗口
-                self._activate_window()
-                time.sleep(0.1)
-
-                # Ctrl+F 打开搜索
-                self._window.SendKeys("{Ctrl}f")
-                time.sleep(0.2)
-
-                # Ctrl+A 全选 → 粘贴联系人名 → Enter
-                self.auto.SendKeys("{Ctrl}a")
-                time.sleep(0.05)
-
-                pyperclip.copy(contact)
-                self.auto.SendKeys("{Ctrl}v")
-                time.sleep(0.1)
-
-                self.auto.SendKeys("{Enter}")
-                time.sleep(0.3)
-
-                return True
-        except Exception:
-            logger.exception("切换联系人失败: %s", contact)
-            return False
-
-    # ------------------------------------------------------------
-    # 发送文本
-    # ------------------------------------------------------------
-    def send_text(self, contact: str, text: str) -> bool:
-        """向指定联系人发送文本消息。"""
-        if not self._window:
-            logger.error("微信窗口不可用")
-            return False
-
-        # 切到目标联系人
-        if not self._switch_contact(contact):
-            return False
-
-        try:
-            with self._lock:
-                # 方式1: 尝试 ValuePattern 直接设值（Electron 微信 4.x 支持）
-                edit = self._find_input_box()
-                if edit and self._try_set_value(edit, text):
-                    self._click_send()
-                    return True
-
-                # 方式2: 剪贴板后备
-                logger.debug("ValuePattern 不可用，使用剪贴板方式")
-                pyperclip.copy(text)
-                self.auto.SendKeys("{Ctrl}v")
-                time.sleep(0.1)
-                self.auto.SendKeys("{Enter}")
-                return True
-
-        except Exception:
-            logger.exception("UIA 发送失败")
-            return False
-
-    # ------------------------------------------------------------
-    # 输入框定位
-    # ------------------------------------------------------------
-    def _find_input_box(self):
-        """遍历窗口 UIA 子树，找到聊天输入框。"""
-        window = self._window
-        center_y = window.BoundingRectangle.top + window.BoundingRectangle.height() / 2
-
-        candidates = []
-        for ctrl, _ in self.auto.WalkTree(window, lambda c: True, maxDepth=6):
-            if ctrl.ControlTypeName == "EditControl":
-                # 只考虑窗口下半部分的 EditControl（聊天输入框）
-                if hasattr(ctrl, 'BoundingRectangle') and ctrl.BoundingRectangle.top >= center_y:
-                    w = ctrl.BoundingRectangle.width()
-                    if w > 100:
-                        candidates.append((w * ctrl.BoundingRectangle.height(), ctrl))
-
-        if candidates:
-            candidates.sort(key=lambda x: x[0], reverse=True)
-            logger.debug("找到输入框候选: %d 个", len(candidates))
-            return candidates[0][1]
-        return None
-
-    def _try_set_value(self, edit, text: str) -> bool:
-        """尝试通过 ValuePattern.SetValue 设置文本。"""
-        try:
-            pattern = edit.GetPattern(self.auto.PatternId.ValuePattern)
-            if pattern:
-                pattern.SetValue("")  # 清空
-                pattern.SetValue(text)
-                return True
-        except Exception:
-            pass
-        return False
-
-    def _click_send(self) -> None:
-        """点击发送按钮或按 Enter。"""
-        try:
-            self.auto.SendKeys("{Enter}")
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------
-    # 窗口激活
-    # ------------------------------------------------------------
-    def _activate_window(self) -> None:
-        """激活微信窗口（允许后台发送）。"""
+    def _activate(self):
         try:
             import ctypes
-            from ctypes import wintypes
-
-            user32 = ctypes.windll.user32
-            kernel32 = ctypes.windll.kernel32
-
-            hwnd = self._window.NativeWindowHandle
-            fore_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), 0)
-            cur_thread = kernel32.GetCurrentThreadId()
-
-            user32.AttachThreadInput(cur_thread, fore_thread, True)
-            try:
-                user32.SetForegroundWindow(hwnd)
-                user32.BringWindowToTop(hwnd)
-            finally:
-                user32.AttachThreadInput(cur_thread, fore_thread, False)
+            hwnd = ctypes.windll.user32.FindWindowW('Qt51514QWindowIcon', None)
+            if not hwnd:
+                hwnd = ctypes.windll.user32.FindWindowW('WeChatMainWndForPC', None)
+            if hwnd:
+                WE_CHAT_TID = ctypes.windll.user32.GetWindowThreadProcessId(hwnd, None)
+                CURRENT_TID = ctypes.windll.kernel32.GetCurrentThreadId()
+                ctypes.windll.user32.AttachThreadInput(CURRENT_TID, WE_CHAT_TID, True)
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                ctypes.windll.user32.BringWindowToTop(hwnd)
+                ctypes.windll.user32.AttachThreadInput(CURRENT_TID, WE_CHAT_TID, False)
         except Exception:
-            logger.debug("窗口激活失败（不影响发送）")
+            pass
+
+    def _switch_contact(self, contact: str) -> bool:
+        """Ctrl+F → 粘贴联系人名 → Enter"""
+        if not self._ensure_window():
+            return False
+        self._activate()
+
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.FindWindowW('Qt51514QWindowIcon', None)
+            if not hwnd:
+                hwnd = ctypes.windll.user32.FindWindowW('WeChatMainWndForPC', None)
+            if not hwnd:
+                return False
+
+            WE_CHAT_TID = ctypes.windll.user32.GetWindowThreadProcessId(hwnd, None)
+            CURRENT_TID = ctypes.windll.kernel32.GetCurrentThreadId()
+            ctypes.windll.user32.AttachThreadInput(CURRENT_TID, WE_CHAT_TID, True)
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            time.sleep(0.3)
+
+            # Ctrl+F
+            ctypes.windll.user32.keybd_event(0x11, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0x46, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0x46, 0, 2, 0)
+            ctypes.windll.user32.keybd_event(0x11, 0, 2, 0)
+            time.sleep(0.5)
+
+            # Ctrl+A 清空 + Ctrl+V 粘贴
+            ctypes.windll.user32.keybd_event(0x11, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0x41, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0x41, 0, 2, 0)
+            ctypes.windll.user32.keybd_event(0x11, 0, 2, 0)
+            time.sleep(0.15)
+
+            import pyperclip
+            pyperclip.copy(contact)
+            time.sleep(0.1)
+            ctypes.windll.user32.keybd_event(0x11, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0x56, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0x56, 0, 2, 0)
+            ctypes.windll.user32.keybd_event(0x11, 0, 2, 0)
+            time.sleep(0.3)
+
+            # Enter
+            ctypes.windll.user32.keybd_event(0x0D, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0x0D, 0, 2, 0)
+            time.sleep(0.8)
+
+            return True
+        finally:
+            try:
+                ctypes.windll.user32.AttachThreadInput(CURRENT_TID, WE_CHAT_TID, False)
+            except Exception:
+                pass
+
+    def _locate_input(self) -> bool:
+        if not self._ensure_window():
+            return False
+        if self._input_control is not None:
+            try:
+                self._input_control.GetCurrentPattern()
+                return True
+            except Exception:
+                self._input_control = None
+                self._send_button = None
+
+        auto = self._auto
+        win_rect = self._window.BoundingRectangle
+        win_center_y = win_rect.top + win_rect.height() / 2
+
+        edits = []
+
+        def walk(ctrl, depth=0):
+            if depth > 14:
+                return
+            try:
+                for child in ctrl.GetChildren():
+                    try:
+                        if child.ControlTypeName == "EditControl":
+                            edits.append(child)
+                        walk(child, depth + 1)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        try:
+            walk(self._window)
+        except Exception:
+            pass
+
+        if not edits:
+            log.warning("未找到输入控件，使用坐标后备方案")
+            self._use_coord_fallback = True
+            return True
+
+        candidates = [e for e in edits
+                      if e.BoundingRectangle and
+                      e.BoundingRectangle.top >= win_center_y - 20 and
+                      e.BoundingRectangle.width() > 100]
+
+        if not candidates:
+            candidates = [e for e in edits if e.BoundingRectangle]
+
+        candidates.sort(key=lambda e: e.BoundingRectangle.width() *
+                        e.BoundingRectangle.height(), reverse=True)
+
+        for ctrl in candidates:
+            rect = ctrl.BoundingRectangle
+            if rect.width() * rect.height() < 200:
+                continue
+            if ctrl.IsValuePatternAvailable:
+                self._input_control = ctrl
+                log.info("聊天输入框: %dx%d (ValuePattern)", rect.width(), rect.height())
+                break
+
+        if not self._input_control:
+            self._input_control = candidates[0] if candidates else edits[0]
+            log.warning("输入框无 ValuePattern，使用剪贴板后备")
+
+        return True
+
+    def send_text(self, contact: str, text: str) -> bool:
+        """发送文本消息。contact: 群名/联系人名，text: 消息内容。"""
+        with self._lock:
+            if not self._ready:
+                log.error("UIA 未就绪")
+                return False
+            if not self._ensure_window():
+                return False
+            if "<PIL." in text:
+                log.warning("跳过 PIL 引用消息")
+                return False
+
+            self._activate()
+
+            if self.search_enabled and contact:
+                if contact != self._last_contact:
+                    self._switch_contact(contact)
+                    self._last_contact = contact
+
+            if not self._locate_input():
+                return False
+
+            try:
+                if self._use_coord_fallback:
+                    import ctypes
+                    from ctypes import wintypes
+                    hwnd = ctypes.windll.user32.FindWindowW('Qt51514QWindowIcon', None)
+                    if not hwnd:
+                        hwnd = ctypes.windll.user32.FindWindowW('WeChatMainWndForPC', None)
+                    if hwnd:
+                        rect = wintypes.RECT()
+                        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                        win_w = rect.right - rect.left
+                        win_h = rect.bottom - rect.top
+                        input_x = rect.left + int(win_w * 0.3)
+                        input_y = rect.top + int(win_h * 0.92)
+                        ctypes.windll.user32.SetCursorPos(input_x, input_y)
+                        ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)
+                        ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)
+                    time.sleep(0.3)
+                    import pyperclip
+                    pyperclip.copy(text)
+                    time.sleep(0.05)
+                    self._auto.SendKeys('{Ctrl}v')
+                    time.sleep(0.3)
+                    self._auto.SendKeys('{Enter}')
+                    log.info("[UIA✓] %s: %s...", contact, text[:50])
+                    return True
+
+                ctrl = self._input_control
+                if ctrl.IsValuePatternAvailable:
+                    try:
+                        ctrl.SetValue("")
+                    except Exception:
+                        pass
+                    try:
+                        ctrl.SetValue(text)
+                    except Exception:
+                        import pyperclip
+                        pyperclip.copy(text)
+                        time.sleep(0.05)
+                        ctrl.SendKeys('{Ctrl}a')
+                        ctrl.SendKeys('{Ctrl}v')
+                else:
+                    import pyperclip
+                    pyperclip.copy(text)
+                    ctrl.SendKeys('{Ctrl}a')
+                    time.sleep(0.05)
+                    ctrl.SendKeys('{Ctrl}v')
+
+                time.sleep(0.1)
+                if self._send_button:
+                    self._send_button.Click()
+                else:
+                    ctrl.SendKeys('{Enter}')
+
+                log.info("[UIA✓] %s: %s...", contact, text[:50])
+                return True
+            except Exception as e:
+                log.error("[UIA✗] %s: %s", contact, e)
+                return False

@@ -1,19 +1,26 @@
 """
-群聊 AI 机器人 — 入口（WeFlow + UIA 版）
+群聊 AI 机器人 — 入口 (Akasha-WeFlow 方案)
+├─ WeFlow SSE 接收微信消息
+├─ BotCore 过滤/路由/会话管理
+├─ LLMClient DeepSeek 回复
+└─ UIA 自动化发送消息
+
 用法: python main.py
 """
 import logging
 import sys
 import time
+import threading
 
 from src.config_loader import load_config
 from src.weflow_client import WeFlowClient, WeFlowMessage
 from src.bot_core import BotCore
 from src.llm_client import LLMClient
+from src.state import BotState
+from src.web_panel import start_web, set_bot_state
 
 
 def setup_logging():
-    """配置日志：控制台 + 文件（按天轮转）。"""
     fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
@@ -41,21 +48,32 @@ def main():
 
     # 1. 加载配置
     config = load_config()
-    logger.info("配置加载完成: llm=%s/%s, bot=%s", config.llm.provider, config.llm.model, config.bot.name)
+    logger.info("配置: llm=%s/%s, bot=%s", config.llm.provider, config.llm.model, config.bot.name)
 
-    # 2. 初始化各模块
+    # 2. 全局状态
+    state = BotState()
+    set_bot_state(state)
+
+    # 3. 初始化模块
     llm = LLMClient(config)
-    weflow = WeFlowClient(config)
+    weflow = WeFlowClient(
+        base_url="http://127.0.0.1:5031",
+        access_token=config.weflow_token,
+    )
+    weflow.set_bot_identity(
+        nicknames=[config.bot.name],
+        wxid=getattr(config, 'bot_wxid', ''),
+    )
     bot = BotCore(config, weflow)
 
-    # 3. 注册消息回调
+    # 4. 消息回调
     def on_msg(msg: WeFlowMessage):
         logger.debug(
             "消息: session=%s, sender=%s, content=%s",
             msg.session_id, msg.sender_name, msg.content[:80],
         )
 
-        # BotCore 处理：过滤 + 命令
+        # 命令处理
         cmd_result = bot.handle(msg)
         if cmd_result is not None:
             reply_text, roomid = cmd_result
@@ -63,27 +81,38 @@ def main():
             weflow.send_text(reply_text, roomid, msg.sender_name)
             return
 
-        # 需要 LLM 处理的消息
-        if msg.is_group and bot._is_at_bot(msg):
+        # LLM 处理
+        if msg.is_group and weflow.is_at_bot(msg):
             roomid = msg.roomid
             history = bot.get_history(roomid)
-            logger.info("LLM 请求: roomid=%s, rounds=%d", roomid, len(history) // 2)
+            logger.info("LLM: roomid=%s, rounds=%d", roomid, len(history)//2)
 
             reply = llm.chat(history)
             bot.add_reply(roomid, reply)
 
-            success = weflow.send_text(reply, roomid, msg.sender_name)
-            if success:
-                logger.info("回复成功: roomid=%s, reply=%s", roomid, reply[:50])
-            else:
-                logger.warning("回复失败: roomid=%s", roomid)
+            weflow.send_text(reply, roomid, msg.sender_name)
+            logger.info("回复: roomid=%s, text=%s", roomid, reply[:50])
 
     weflow.on_message(on_msg)
-    weflow.start_receiving()
 
-    logger.info("✅ 机器人已启动（WeFlow + UIA 模式）")
-    logger.info("   确保已启动 WeFlow 并开启 API 服务（端口 5031）")
+    # 5. 回调注册
+    state.set_callbacks(
+        restart_fn=lambda: None,  # SSE 自动重连，无需手动重启
+        stop_fn=lambda: weflow.stop(),
+    )
+
+    # 6. 启动
+    weflow.start_receiving()
+    start_web(8766)
+    state.running = True
+    state.weflow_connected = True
+
+    logger.info("=" * 50)
+    logger.info("✅ 机器人已启动 (WeFlow + UIA 模式)")
+    logger.info("   Web 面板: http://127.0.0.1:8766")
+    logger.info("   确保 WeFlow 已启动并开启 API 服务 (端口 5031)")
     logger.info("   按 Ctrl+C 退出")
+    logger.info("=" * 50)
 
     try:
         while True:
@@ -91,6 +120,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("收到退出信号")
     finally:
+        state.running = False
         weflow.stop()
 
 
