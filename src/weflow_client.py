@@ -41,8 +41,9 @@ class WeFlowClient:
         self.bot_nicknames = nicknames
 
     def is_at_bot(self, msg: WeFlowMessage) -> bool:
+        # 只匹配 @鼠鼠 格式，避免普通对话中的"鼠鼠"触发
         for nick in self.bot_nicknames:
-            if nick and nick in msg.content:
+            if nick and f"@{nick}" in msg.content:
                 return True
         return False
 

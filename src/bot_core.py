@@ -105,8 +105,8 @@ class BotCore:
     # 内部方法
     # ----------------------------------------------------------------
     def _is_at_bot(self, msg: WeFlowMessage) -> bool:
-        """判断消息是否 @了机器人（基于内容检测）。"""
-        if self.bot_name in msg.content:
+        """判断消息是否 @了机器人（精确匹配 @昵称）。"""
+        if f"@{self.bot_name}" in msg.content:
             return True
         return False
 
