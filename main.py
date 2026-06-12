@@ -47,7 +47,7 @@ def main():
 
     llm = LLMClient(config)
     client = WeFlowClient(access_token=config.weflow_token)
-    client.set_bot_identity(nicknames=[config.bot.name])
+    client.set_bot_identity(nicknames=[config.bot.name], wxid="wxid_hgla5drf0k8119")
     bot = BotCore(config, client)
 
     def on_msg(msg: WeFlowMessage):
@@ -69,8 +69,10 @@ def main():
 
             reply = llm.chat(history)
             bot.add_reply(roomid, reply)
-            client.send_text(reply, roomid, msg.sender_name)
-            logger.info("Reply: %s -> %s", roomid, reply[:50])
+            # 回复前加 @发送者
+            full_reply = f"@{msg.sender_name} {reply}"
+            client.send_text(full_reply, roomid, msg.sender_name)
+            logger.info("Reply: %s -> %s", roomid, full_reply[:50])
 
     client.on_message(on_msg)
     client.start_receiving()

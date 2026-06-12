@@ -39,6 +39,7 @@ class WeFlowClient:
 
     def set_bot_identity(self, nicknames: list, wxid: str = ""):
         self.bot_nicknames = nicknames
+        self.bot_wxid = wxid
 
     def is_at_bot(self, msg: WeFlowMessage) -> bool:
         # 只匹配 @鼠鼠 格式，避免普通对话中的"鼠鼠"触发
@@ -97,8 +98,12 @@ class WeFlowClient:
                 if len(self._seen_ids) > 5000:
                     self._seen_ids = set(list(self._seen_ids)[-2500:])
 
-                # 自回过滤
-                if msg.sender_name in self.bot_nicknames:
+                # 自回过滤：按 wxid 或昵称
+                if msg.sender_name == self.bot_wxid or msg.sender_name in self.bot_nicknames:
+                    continue
+
+                # 只响应 @鼠鼠 的消息
+                if not self.is_at_bot(msg):
                     continue
 
                 logger.info("Msg: room=%s, sender=%s, text=%s", talker, msg.sender_name, msg.content[:80])
