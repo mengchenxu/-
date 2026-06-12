@@ -156,15 +156,14 @@ class WeFlowClient:
             return None
 
     def send_text(self, text: str, receiver: str, at_sender: str = "") -> bool:
-        if self._sender is None:
-            try:
-                from src.uia_sender import UiaSender
-                self._sender = UiaSender()
-                logger.info("UIA sender ready")
-            except Exception:
-                return False
+        """通过守护进程发送（避免终端抢焦点）。"""
         try:
-            return self._sender.send_text(receiver, text, at_sender)
+            import json
+            cmd = {"contact": receiver, "text": text, "at_sender": at_sender}
+            with open("send_queue.json", "w", encoding="utf-8") as f:
+                json.dump(cmd, f)
+            logger.info("Queued: @%s %s...", at_sender or "no-at", text[:40])
+            return True
         except Exception:
             return False
 
