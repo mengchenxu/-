@@ -40,15 +40,18 @@ def _type_text(text: str):
 
 
 def _focus_wechat():
-    """激活微信 — 先释放控制台，避免焦点被抢。"""
-    # 从控制台分离，让键盘事件全部去微信
+    """激活微信 — 最小化控制台，避免焦点被抢。"""
+    # 最小化控制台窗口（而不是 FreeConsole 销毁它）
     try:
-        ctypes.windll.kernel32.FreeConsole()
+        hwnd_console = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd_console:
+            ctypes.windll.user32.ShowWindow(hwnd_console, 6)  # SW_MINIMIZE
     except Exception:
         pass
     time.sleep(0.1)
 
-    for cls in ('Qt51514QWindowIcon', 'WeChatMainWndForPC', 'CefTopWindow'):
+    # 尝试多种窗口类名（适配不同微信版本）
+    for cls in ('Qt51514QWindowIcon', 'WeChatMainWndForPC', 'CefTopWindow', 'Qt51524QWindowIcon', 'Qt51522QWindowIcon'):
         hwnd = ctypes.windll.user32.FindWindowW(cls, None)
         if hwnd:
             TID = ctypes.windll.user32.GetWindowThreadProcessId(hwnd, None)

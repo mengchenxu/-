@@ -156,15 +156,18 @@ class WeFlowClient:
             return None
 
     def send_text(self, text: str, receiver: str, at_sender: str = "") -> bool:
-        """通过守护进程发送（避免终端抢焦点）。"""
+        """通过 UIA 键盘模拟直接发送（进程内，无需 sender_daemon）。"""
         try:
-            import json
-            cmd = {"contact": receiver, "text": text, "at_sender": at_sender}
-            with open("send_queue.json", "w", encoding="utf-8") as f:
-                json.dump(cmd, f)
-            logger.info("Queued: @%s %s...", at_sender or "no-at", text[:40])
-            return True
+            if self._sender is None:
+                from src.uia_sender import UiaSender
+                self._sender = UiaSender()
+                logger.info("UIA 发送器初始化成功")
+            result = self._sender.send_text(receiver, text, at_sender)
+            if result:
+                logger.info("Sent: @%s %s...", at_sender or "no-at", text[:40])
+            return result
         except Exception:
+            logger.exception("发送失败")
             return False
 
     def stop(self):
