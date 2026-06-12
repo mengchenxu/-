@@ -34,6 +34,8 @@ class GroupConfig:
 @dataclass
 class SessionConfig:
     max_history_rounds: int = 10
+    max_user_facts: int = 20
+    context_summary_interval: int = 15
 
 
 @dataclass

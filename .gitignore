@@ -23,6 +23,9 @@ logs/
 Thumbs.db
 Desktop.ini
 
+# 用户记忆数据（含隐私，不提交）
+data/
+
 # WCF 运行时
 *.dll
 WeChatFerry/
