@@ -114,6 +114,10 @@ class WeFlowClient:
             try:
                 logger.info("连接 WeFlow SSE: %s", url[:60])
                 resp = requests.get(url, stream=True, timeout=300)
+                if resp.status_code != 200:
+                    logger.warning("SSE 返回 %d，5秒后重试", resp.status_code)
+                    time.sleep(5)
+                    continue
                 logger.info("SSE 连接成功: %d", resp.status_code)
 
                 for line in resp.iter_lines(decode_unicode=True):

@@ -62,4 +62,6 @@ def load_config(path: str = "config/config.yaml") -> AppConfig:
         config.groups = GroupConfig(**data["groups"])
     if "session" in data:
         config.session = SessionConfig(**data["session"])
+    if "weflow_token" in data:
+        config.weflow_token = data["weflow_token"]
     return config
