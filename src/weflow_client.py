@@ -27,7 +27,7 @@ class WeFlowMessage:
 
 
 class WeFlowClient:
-    def __init__(self, base_url: str = "http://127.0.0.1:5031", access_token: str = "", poll_interval: float = 1.5):
+    def __init__(self, base_url: str = "http://127.0.0.1:5031", access_token: str = "", poll_interval: float = 2.0):
         self.base_url = base_url
         self.access_token = access_token
         self.poll_interval = poll_interval
@@ -35,7 +35,9 @@ class WeFlowClient:
         self._callback: Optional[Callable[[WeFlowMessage], None]] = None
         self._seen_ids: set = set()
         self.bot_nicknames: list = []
+        self.bot_wxid: str = ""
         self._sender = None
+        self._start_ts = int(time.time())  # 启动时间，过滤旧消息
 
     def set_bot_identity(self, nicknames: list, wxid: str = ""):
         self.bot_nicknames = nicknames
@@ -91,6 +93,11 @@ class WeFlowClient:
                 if not msg.content.strip():
                     continue
 
+                # 忽略启动前的旧消息（createTime 是 Unix 秒级时间戳）
+                create_time = mdata.get("createTime", 0)
+                if create_time and create_time < self._start_ts - 10:
+                    continue
+
                 key = msg.rawid
                 if key in self._seen_ids:
                     continue
@@ -128,7 +135,7 @@ class WeFlowClient:
             except Exception:
                 return False
         try:
-            return self._sender.send_text(receiver, text)
+            return self._sender.send_text(receiver, text, at_sender)
         except Exception:
             return False
 

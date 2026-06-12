@@ -69,10 +69,9 @@ def main():
 
             reply = llm.chat(history)
             bot.add_reply(roomid, reply)
-            # 回复前加 @发送者
-            full_reply = f"@{msg.sender_name} {reply}"
-            client.send_text(full_reply, roomid, msg.sender_name)
-            logger.info("Reply: %s -> %s", roomid, full_reply[:50])
+            # UIA 会真实 @发送者
+            client.send_text(reply, roomid, msg.sender_name)
+            logger.info("Reply: %s -> %s", roomid, reply[:50])
 
     client.on_message(on_msg)
     client.start_receiving()
