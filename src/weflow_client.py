@@ -108,6 +108,29 @@ class WeFlowClient:
     def get_display_name(self, wxid: str) -> str:
         return self._name_cache.get(wxid, wxid)
 
+    def sync_contacts_to_memory(self, user_memory) -> int:
+        """将联系人列表同步到 UserMemoryStore，让机器人认识群里所有人。"""
+        count = 0
+        for wxid, name in self._name_cache.items():
+            profile = user_memory.get(wxid)
+            if not profile:
+                user_memory.record_message(wxid, name)
+                count += 1
+            elif not profile.preferred_name or profile.preferred_name == wxid:
+                profile.preferred_name = name
+        if count:
+            user_memory.save()
+            logger.info("已同步 %d 个新联系人到用户记忆", count)
+        return count
+
+    def find_contact(self, name: str) -> str | None:
+        """在联系人缓存中按名字查找 wxid。找不到返回 None。"""
+        name_lower = name.lower().strip()
+        for wxid, cname in self._name_cache.items():
+            if name_lower in cname.lower():
+                return wxid
+        return None
+
     def is_at_bot(self, msg: WeFlowMessage) -> bool:
         # 只匹配 @鼠鼠 格式，避免普通对话中的"鼠鼠"触发
         for nick in self.bot_nicknames:

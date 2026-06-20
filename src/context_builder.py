@@ -82,6 +82,10 @@ def build_llm_context(
         mentioned_info = []
         for name in mentioned_others:
             profile = user_memory.find_by_name(name)
+            if profile is None:
+                # 找不到 → 新建用户档案（可能是群里还没发过言的人）
+                user_memory.record_message(name, name)
+                profile = user_memory.get(name)
             if profile and profile.wxid != speaker_wxid:
                 display = profile.preferred_name or name
                 ctx = profile.get_context_summary()
@@ -89,6 +93,8 @@ def build_llm_context(
                     mentioned_info.append(f"  @{display} — {ctx}")
                 else:
                     mentioned_info.append(f"  @{display}")
+            elif profile and profile.wxid == speaker_wxid:
+                pass  # 发言人 @ 自己，跳过
             else:
                 mentioned_info.append(f"  @{name}")
         if mentioned_info:

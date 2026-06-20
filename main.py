@@ -73,6 +73,9 @@ def main():
     llm = LLMClient(config)
     client = WeFlowClient(access_token=config.weflow_token)
     client.set_bot_identity(nicknames=[config.bot.name], wxid="wxid_hgla5drf0k8119")
+    # 同步联系人 → 让机器人认识群里所有人
+    synced = client.sync_contacts_to_memory(user_memory)
+    logger.info("Contacts synced: %d new members", synced)
     bot = BotCore(config, client, user_memory=user_memory,
                   style_observer=style_observer, data_dir="data")
 
