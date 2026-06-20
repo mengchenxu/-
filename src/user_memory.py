@@ -26,6 +26,10 @@ class UserProfile:
     topics: List[str] = field(default_factory=list)             # 常讨论的话题
     notes: str = ""                                              # LLM 可更新的自由格式备注
 
+    # 风格学习字段
+    speaking_style: str = ""            # LLM 生成的个人风格描述（1句话）
+    catchphrases: list = field(default_factory=list)  # 口头禅
+
     def update_name(self, name: str):
         """追踪显示名变化"""
         if name and name not in self.display_names:
@@ -63,6 +67,8 @@ class UserProfile:
             parts.append(f"常聊: {', '.join(self.topics[-5:])}")
         if self.notes:
             parts.append(f"备注: {self.notes}")
+        if self.speaking_style:
+            parts.append(f"风格: {self.speaking_style}")
         if not parts:
             return ""
         return " | ".join(parts)
@@ -104,6 +110,8 @@ class UserMemoryStore:
                     relations=d.get("relations", {}),
                     topics=d.get("topics", []),
                     notes=d.get("notes", ""),
+                    speaking_style=d.get("speaking_style", ""),
+                    catchphrases=d.get("catchphrases", []),
                 )
                 self._users[wxid] = profile
             logger.info("已加载 %d 个用户档案", len(self._users))
@@ -126,6 +134,8 @@ class UserMemoryStore:
                     "relations": profile.relations,
                     "topics": profile.topics,
                     "notes": profile.notes,
+                    "speaking_style": profile.speaking_style,
+                    "catchphrases": profile.catchphrases,
                 }
             with open(self.file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -214,6 +224,15 @@ class UserMemoryStore:
         """更新用户备注"""
         profile = self.get_or_create(wxid)
         profile.notes = notes
+        self.save()
+
+    def set_speaking_style(self, wxid: str, style: str, catchphrases: list = None):
+        """更新用户的说话风格。"""
+        profile = self.get_or_create(wxid)
+        if style.strip():
+            profile.speaking_style = style.strip()
+        if catchphrases:
+            profile.catchphrases = list(set(profile.catchphrases + catchphrases))[:10]
         self.save()
 
     def find_by_name(self, name: str) -> Optional[UserProfile]:
