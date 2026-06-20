@@ -83,11 +83,12 @@ def build_llm_context(
         for name in mentioned_others:
             profile = user_memory.find_by_name(name)
             if profile and profile.wxid != speaker_wxid:
+                display = profile.preferred_name or name
                 ctx = profile.get_context_summary()
                 if ctx:
-                    mentioned_info.append(f"  @{name} — {ctx}")
+                    mentioned_info.append(f"  @{display} — {ctx}")
                 else:
-                    mentioned_info.append(f"  @{name}")
+                    mentioned_info.append(f"  @{display}")
             else:
                 mentioned_info.append(f"  @{name}")
         if mentioned_info:

@@ -236,12 +236,20 @@ class UserMemoryStore:
         self.save()
 
     def find_by_name(self, name: str) -> Optional[UserProfile]:
-        """按显示名模糊查找用户"""
+        """按显示名/wxid 模糊查找用户"""
         name_lower = name.lower().strip()
+        # 先精确匹配 wxid
+        if name_lower in self._users:
+            return self._users[name_lower]
         for profile in self._users.values():
+            # 匹配 wxid
+            if name_lower in profile.wxid.lower():
+                return profile
+            # 匹配历史显示名
             for dn in profile.display_names:
                 if name_lower in dn.lower():
                     return profile
+            # 匹配当前名字
             if name_lower in profile.preferred_name.lower():
                 return profile
         return None
@@ -267,14 +275,15 @@ class UserMemoryStore:
         return ""
 
     def get_user_context(self, wxid: str) -> str:
-        """为单个用户生成 LLM 上下文"""
+        """为单个用户生成 LLM 上下文（优先用显示名，不暴露 wxid）"""
         profile = self.get(wxid)
         if not profile:
             return ""
+        name = profile.preferred_name or wxid
         summary = profile.get_context_summary()
         if summary:
-            return f"[用户 {profile.preferred_name or wxid}]: {summary}"
-        return f"[用户 {profile.preferred_name or wxid}]: 暂无已知信息"
+            return f"[{name}]: {summary}"
+        return f"[{name}]: 暂无已知信息"
 
     @property
     def user_count(self) -> int:
