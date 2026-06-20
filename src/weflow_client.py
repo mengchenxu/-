@@ -137,6 +137,9 @@ class WeFlowClient:
                     if not wxid:
                         continue
                     name = m.get("displayName") or m.get("nickname") or wxid
+                    # 同步到名缓存（修复 get_display_name 只返回 wxid 的问题）
+                    self._name_cache[wxid] = name
+                    # 同步到用户记忆
                     profile = user_memory.get(wxid)
                     if not profile:
                         user_memory.record_message(wxid, name)
