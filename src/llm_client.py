@@ -248,6 +248,73 @@ class LLMClient:
             return old_summary, []
 
     # ----------------------------------------------------------------
+    # 风格分析
+    # ----------------------------------------------------------------
+    def analyze_style(self, messages: list[dict]) -> dict:
+        """
+        分析一组群聊消息，提取群风格和关键发言人的个人风格。
+
+        messages: [{"wxid": "...", "name": "...", "content": "..."}, ...]
+        返回: {"group_style": str, "top_words": [str], "top_emojis": [str],
+               "user_styles": {wxid: {"style": str, "catchphrases": [str]}}}
+        """
+        if not messages:
+            return {"group_style": "", "top_words": [], "top_emojis": [], "user_styles": {}}
+
+        # 构建分析 prompt
+        lines = []
+        for m in messages[-30:]:
+            lines.append(f"[{m['name']}]: {m['content'][:150]}")
+
+        prompt = f"""分析以下群聊消息的风格特征。
+
+消息:
+{chr(10).join(lines)}
+
+请返回 JSON（不要其他文字）：
+{{
+  "group_style": "群的总体说话风格，1-2句话概括。例如：互怼但不伤和气、喜欢用反问句、正经话题撑不过三句",
+  "top_words": ["高频词1", "高频词2", "高频词3"],
+  "top_emojis": ["常用表情1", "常用表情2"],
+  "user_styles": {{
+    "发言者wxid": {{
+      "style": "该成员的说话风格，1句话",
+      "catchphrases": ["口头禅1", "口头禅2"]
+    }}
+  }}
+}}
+
+注意：
+- user_styles 只包含发言 >= 5 条的活跃成员
+- 口头禅必须是该成员在消息中实际使用过的短语
+- 只返回 JSON，不要 markdown 代码块"""
+
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一个语言风格分析师。只返回 JSON，不要其他文字。"},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=800,
+                temperature=0.3,
+            )
+            text = resp.choices[0].message.content.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1]
+                if text.endswith("```"):
+                    text = text[:-3]
+                text = text.strip()
+            result = json.loads(text)
+            logger.info("风格分析完成: 群=%s, 用户=%d",
+                        result.get("group_style", "")[:40],
+                        len(result.get("user_styles", {})))
+            return result
+        except Exception:
+            logger.exception("风格分析失败")
+            return {"group_style": "", "top_words": [], "top_emojis": [], "user_styles": {}}
+
+    # ----------------------------------------------------------------
     # 回复预处理
     # ----------------------------------------------------------------
     def _sanitize(self, text: str) -> str:
