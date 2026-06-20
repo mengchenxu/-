@@ -30,36 +30,44 @@ class WeFlowMessage:
 
     @staticmethod
     def _extract_mentions(raw_content: str, content: str) -> list:
-        """
-        从 rawContent 和 content 中智能提取 @mention。
-        WeChat 用 \\u2005（Four-Per-Em Space）分隔 @mention。
-        同时处理名字中可能包含空格的情况。
-        """
+        import re
         mentions = []
-        # 方法1: 从 rawContent 提取（优先，格式更规范）
-        if ":\n" in raw_content:
-            _, rest = raw_content.split(":\n", 1)
-            # \\u2005 是 @mention 之间的分隔符
-            # 格式: @name1 @name2 message
+        # 方法1: 从 rawContent 提取 WeChat 真实 @mention（  分隔）
+        source = raw_content if ":\n" in raw_content else content
+        if ":\n" in source:
+            _, rest = source.split(":\n", 1)
             for part in rest.split(" "):
                 part = part.strip()
                 if part.startswith("@"):
                     name = part[1:].strip()
-                    if name:
+                    # 截断：如果名字后面紧跟中文文本，只取拉丁字母+空格部分
+                    # 例: "@B L U E 在吗" → "B L U E"
+                    # 例: "@贯一 你好" → "贯一"
+                    latin_match = re.match(r'([a-zA-Z][a-zA-Z0-9 ]*)', name)
+                    if latin_match:
+                        name = latin_match.group(1).strip()
+                    else:
+                        cjk_match = re.match(r'([一-鿿぀-ゟ가-힯]{2,4})', name)
+                        if cjk_match:
+                            name = cjk_match.group(1).strip()
+                    if name and name not in mentions:
                         mentions.append(name)
-        # 方法2: 从 content 提取（兜底）
-        if not mentions:
-            # 先按 \\u2005 分割
-            for part in content.split(" "):
-                part = part.strip()
-                if part.startswith("@"):
-                    name = part[1:].strip()
-                    if name:
-                        mentions.append(name)
-            # 如果仍未匹配到，用简单正则兜底
-            if not mentions:
-                import re
-                mentions = re.findall(r'@(\S+)', content)
+
+        # 方法2: 扫描全文中的 @xxx 模式（捕获手打的 @名字）
+        text_to_scan = raw_content if raw_content else content
+        # 2a: 拉丁字母名字（可能含空格），如 @B L U E
+        for m in re.finditer(r'@([a-zA-Z][a-zA-Z0-9 ]*(?:\s+[a-zA-Z][a-zA-Z0-9 ]*)*)', text_to_scan):
+            name = m.group(1).strip()
+            if name and name not in mentions:
+                mentions.append(name)
+        # 2b: 中日韩名字（2-4 个字符）
+        for m in re.finditer(r'@([一-鿿぀-ゟ가-힯]{2,4})', text_to_scan):
+            name = m.group(1).strip()
+            if name and name not in mentions:
+                mentions.append(name)
+
+        return mentions
+
         return mentions
 
     @property
