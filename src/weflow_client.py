@@ -239,16 +239,17 @@ class WeFlowClient:
         except Exception:
             return None
 
-    def send_text(self, text: str, receiver: str, at_sender: str = "") -> bool:
-        """通过 UIA 键盘模拟直接发送（进程内，无需 sender_daemon）。"""
+    def send_text(self, text: str, receiver: str, at_sender: str = "", at_mentions: list = None) -> bool:
+        """通过 UIA 键盘模拟直接发送（进程内，支持多人 @mention）。"""
         try:
             if self._sender is None:
                 from src.uia_sender import UiaSender
                 self._sender = UiaSender()
                 logger.info("UIA 发送器初始化成功")
-            result = self._sender.send_text(receiver, text, at_sender)
+            result = self._sender.send_text(receiver, text, at_sender, at_mentions)
             if result:
-                logger.info("Sent: @%s %s...", at_sender or "no-at", text[:40])
+                at_info = f"@({','.join([at_sender] + (at_mentions or []))})" if at_sender or at_mentions else "no-at"
+                logger.info("Sent: %s %s...", at_info, text[:40])
             return result
         except Exception:
             logger.exception("发送失败")

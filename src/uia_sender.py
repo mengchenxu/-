@@ -71,32 +71,49 @@ class UiaSender:
         self._lock = threading.Lock()
         self._ready = True
 
-    def send_text(self, contact: str, text: str, at_sender: str = "") -> bool:
+    def _at_mention(self, name: str):
+        """模拟键盘 @某人 并选中。"""
+        _type_at()            # Shift+2 = @
+        time.sleep(0.2)
+        _type_text(name)      # 粘贴名字
+        time.sleep(0.5)
+        _enter()              # Enter 从列表中选中
+
+    def send_text(self, contact: str, text: str, at_sender: str = "", at_mentions: list = None) -> bool:
+        """
+        发送群聊消息，支持多人 @mention。
+        at_sender: 第一个 @的人（通常是发消息的人）
+        at_mentions: 额外要 @的人名列表（从 LLM 回复中提取）
+        """
+        # 合并并去重
+        all_mentions = []
+        seen = set()
+        for name in ([at_sender] if at_sender else []) + (at_mentions or []):
+            name = name.strip()
+            if name and name not in seen:
+                all_mentions.append(name)
+                seen.add(name)
+
         with self._lock:
             if not _focus_wechat():
                 log.error("WeChat window not found")
                 return False
             try:
-                if at_sender:
-                    _type_at()            # @
+                # 依次 @每一个人
+                for name in all_mentions:
+                    self._at_mention(name)
                     time.sleep(0.3)
-                    _type_text(at_sender) # 输入名字
-                    time.sleep(0.5)
-                    _enter()              # 选中
-                    time.sleep(0.3)
-                    _type_at()            # 再输入 @ 或空格
-                    _release(VK_SHIFT)
-                    time.sleep(0.1)
-                    # 这里不输入空格，直接用下面的粘贴
 
+                # 粘贴回复正文
                 import pyperclip
                 pyperclip.copy(text)
                 time.sleep(0.1)
-                _paste()                  # Ctrl+V 粘贴回复
+                _paste()                  # Ctrl+V
                 time.sleep(0.3)
                 _enter()                  # Enter 发送
 
-                log.info("Sent: @%s %s...", at_sender or "no-at", text[:40])
+                at_info = f"@({','.join(all_mentions)})" if all_mentions else "no-at"
+                log.info("Sent: %s %s...", at_info, text[:40])
                 return True
             except Exception as e:
                 log.error("Send failed: %s", e)

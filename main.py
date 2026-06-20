@@ -153,10 +153,37 @@ def main():
         # ---- 记录回复到会话历史 ----
         bot.add_reply(roomid, reply)
 
+        # ---- 提取回复中的 @mention 并转换为真实 @ ----
+        import re
+        reply_mentions = []
+        clean_reply = reply
+
+        # 匹配回复中的 @拉丁名（如 @B L U E）和 @中文名（2-4字）
+        latin_ms = re.findall(r'@([a-zA-Z][a-zA-Z0-9 ]*(?:\s+[a-zA-Z][a-zA-Z0-9 ]*)*)', reply)
+        cjk_ms = re.findall(r'@([一-鿿぀-ゟ가-힯]{2,4})', reply)
+
+        for name in latin_ms + cjk_ms:
+            name = name.strip()
+            if not name or name in reply_mentions:
+                continue
+            # 查找这个人的真实显示名
+            profile = user_memory.find_by_name(name)
+            if profile:
+                real_name = profile.preferred_name or name
+                if real_name not in reply_mentions:
+                    reply_mentions.append(real_name)
+            else:
+                # 未找到也保留名字，让 UIA 尝试
+                if name not in reply_mentions:
+                    reply_mentions.append(name)
+
+            # 从回复文本中移除 @mention（可选：保留名字不删）
+            # clean_reply = clean_reply.replace(f'@{name}', '').strip()
+
         # ---- 发送 ----
         display = client.get_display_name(msg.sender_name)
-        client.send_text(reply, roomid, display)
-        logger.info("Reply: @%s -> %s", display, reply[:80])
+        client.send_text(reply, roomid, display, at_mentions=reply_mentions)
+        logger.info("Reply: @%s +@%s -> %s", display, reply_mentions, reply[:60])
 
         # ---- 定期更新话题摘要（工作记忆） ----
         if bot.should_update_topic(roomid):
