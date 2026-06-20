@@ -33,6 +33,17 @@ class GroupConfig:
 
 
 @dataclass
+class ProactiveConfig:
+    enabled: bool = False
+    cold_silence_minutes: int = 30
+    schedule_times: list = field(default_factory=lambda: ["08:30", "12:30", "18:00", "22:00"])
+    hot_topic_interval_hours: int = 4
+    max_per_day: int = 10
+    min_interval_minutes: int = 30
+    quiet_hours: list = field(default_factory=lambda: ["02:00", "06:00"])
+
+
+@dataclass
 class SessionConfig:
     max_history_rounds: int = 10
     max_user_facts: int = 20
@@ -45,6 +56,7 @@ class AppConfig:
     bot: BotConfig = field(default_factory=BotConfig)
     groups: GroupConfig = field(default_factory=GroupConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
     weflow_token: str = ""
 
 
@@ -65,6 +77,8 @@ def load_config(path: str = "config/config.yaml") -> AppConfig:
         config.groups = GroupConfig(**data["groups"])
     if "session" in data:
         config.session = SessionConfig(**data["session"])
+    if "proactive" in data:
+        config.proactive = ProactiveConfig(**data["proactive"])
     if "weflow_token" in data:
         config.weflow_token = data["weflow_token"]
     return config
