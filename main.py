@@ -15,6 +15,7 @@ from src.state import BotState
 from src.user_memory import UserMemoryStore
 from src.group_memory import GroupMemoryStore
 from src.style_observer import StyleObserver
+from src.proactive_speaker import ProactiveSpeaker
 from src.context_builder import (
     build_llm_context,
     extract_facts_from_reply,
@@ -75,6 +76,13 @@ def main():
     bot = BotCore(config, client, user_memory=user_memory,
                   style_observer=style_observer, data_dir="data")
 
+    # 主动发言系统
+    speaker = ProactiveSpeaker(config, llm, client, group_memory, user_memory)
+    logger.info("Proactive speaker: %s", "enabled" if config.proactive.enabled else "disabled")
+
+    # 记录群最后一条消息时间（冷场检测）
+    last_msg_times: dict[str, float] = {}
+
     def on_msg(msg: WeFlowMessage):
         logger.debug("Msg: room=%s, sender=%s, text=%s",
                      msg.session_id, msg.sender_name, msg.content[:80])
@@ -83,6 +91,9 @@ def main():
 
         roomid = msg.roomid
         speaker_wxid = msg.sender_name
+
+        # 更新最后消息时间（冷场检测用）
+        last_msg_times[roomid] = time.time()
 
         # 所有消息都过 BotCore.handle（记录用户、观察风格）
         result = bot.handle(msg)
@@ -226,8 +237,40 @@ def main():
     start_web(8766)
     state.running = True
 
+    # ---- 主动发言后台线程 ----
+    def _proactive_loop():
+        """每分钟检查一次主动发言条件。"""
+        time.sleep(10)  # 启动后先等 10 秒
+        while state.running:
+            try:
+                for room_id in list(bot._sessions.keys()):
+                    session = bot.get_session(room_id)
+                    last_time = last_msg_times.get(room_id, 0.0)
+                    speaker.check_and_speak(room_id, session, last_time)
+            except Exception:
+                logger.exception("proactive loop error")
+            time.sleep(60)
+
+    import threading
+    threading.Thread(target=_proactive_loop, daemon=True, name="proactive").start()
+    logger.info("Proactive loop started")
+
+    # ---- 启动暖场（延时 90s） ----
+    def _startup_warmup():
+        time.sleep(90)
+        for room_id in list(bot._sessions.keys()):
+            session = bot.get_session(room_id)
+            last_time = last_msg_times.get(room_id, 0.0)
+            speaker.on_startup(room_id, session, last_time)
+
+    threading.Thread(target=_startup_warmup, daemon=True).start()
+
     logger.info("=" * 50)
     logger.info("Bot started (WeFlow + DeepSeek + 3-tier Memory + Search + Style Learning)")
+    logger.info("  Proactive: %s (cold=%dmin, max=%d/day)",
+                "on" if config.proactive.enabled else "off",
+                config.proactive.cold_silence_minutes,
+                config.proactive.max_per_day)
     logger.info("  Web:    http://127.0.0.1:8766")
     logger.info("  Memory: %d users, %d group memories",
                 user_memory.user_count, group_memory.memory_count)
