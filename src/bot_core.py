@@ -39,6 +39,10 @@ class GroupSession:
     topic_keywords: list = field(default_factory=list)  # 话题关键词
     message_since_summary: int = 0        # 距上次话题摘要的消息数
     message_since_memory: int = 0         # 距上次记忆提取的消息数
+    # 风格学习字段
+    group_style: str = ""               # LLM 生成的群风格描述
+    top_words: list = field(default_factory=list)   # 高频词
+    top_emojis: list = field(default_factory=list)  # 常用表情
 
 
 class BotCore:
@@ -50,12 +54,14 @@ class BotCore:
     4. 用户追踪 — 记录群内活跃用户
     """
 
-    def __init__(self, config: AppConfig, weflow_client, user_memory=None, data_dir: str = "data"):
+    def __init__(self, config: AppConfig, weflow_client, user_memory=None,
+                 style_observer=None, data_dir: str = "data"):
         self.config = config
         self.client = weflow_client
         self.bot_name = config.bot.name
         self.cooldown = config.bot.reply_cooldown_seconds
         self.user_memory = user_memory  # UserMemoryStore，由 main.py 注入
+        self.style_observer = style_observer  # StyleObserver，由 main.py 注入
         self.context_summary_interval = config.session.context_summary_interval
         self.data_dir = data_dir
         # 群会话: {group_id: GroupSession}
@@ -97,6 +103,11 @@ class BotCore:
         # 记录到群活跃用户
         session = self._get_session(roomid)
         session.active_users.add(speaker_wxid)
+
+        # ---- 4.5 风格观察（所有群消息，含非@） ----
+        if self.style_observer:
+            self.style_observer.observe(roomid, speaker_wxid, speaker_display, content)
+
         session.message_count += 1
         session.message_since_summary += 1
         session.message_since_memory += 1
@@ -228,6 +239,26 @@ class BotCore:
     def reset_memory_counter(self, roomid: str):
         session = self._get_session(roomid)
         session.message_since_memory = 0
+
+    # ----------------------------------------------------------------
+    # 风格学习触发
+    # ----------------------------------------------------------------
+    def should_analyze_style(self, roomid: str) -> bool:
+        """是否应该触发风格分析。"""
+        if not self.style_observer:
+            return False
+        return self.style_observer.should_analyze(roomid)
+
+    def update_group_style(self, roomid: str, style_text: str,
+                           top_words: list, top_emojis: list):
+        """更新群风格信息。"""
+        session = self._get_session(roomid)
+        if style_text.strip():
+            session.group_style = style_text.strip()
+        if top_words:
+            session.top_words = top_words
+        if top_emojis:
+            session.top_emojis = top_emojis
 
     def extract_context_from_reply(self, roomid: str, reply: str) -> Optional[str]:
         """
