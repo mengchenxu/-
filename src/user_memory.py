@@ -22,6 +22,7 @@ class UserProfile:
     last_seen: float = 0.0
     message_count: int = 0
     known_facts: Dict[str, str] = field(default_factory=dict)  # {"职业": "程序员", "喜欢": "猫"}
+    relations: Dict[str, str] = field(default_factory=dict)     # {"wxid_xxx": "同事", "wxid_yyy": "朋友"}
     topics: List[str] = field(default_factory=list)             # 常讨论的话题
     notes: str = ""                                              # LLM 可更新的自由格式备注
 
@@ -54,9 +55,12 @@ class UserProfile:
             parts.append(f"名字: {self.preferred_name}")
         if self.known_facts:
             facts = ", ".join(f"{k}={v}" for k, v in self.known_facts.items())
-            parts.append(f"已知信息: {facts}")
+            parts.append(f"已知: {facts}")
+        if self.relations:
+            rel_text = ", ".join(f"与{rid}关系={rel}" for rid, rel in self.relations.items())
+            parts.append(f"关系: {rel_text}")
         if self.topics:
-            parts.append(f"常聊话题: {', '.join(self.topics[-5:])}")
+            parts.append(f"常聊: {', '.join(self.topics[-5:])}")
         if self.notes:
             parts.append(f"备注: {self.notes}")
         if not parts:
@@ -97,6 +101,7 @@ class UserMemoryStore:
                     last_seen=d.get("last_seen", 0.0),
                     message_count=d.get("message_count", 0),
                     known_facts=d.get("known_facts", {}),
+                    relations=d.get("relations", {}),
                     topics=d.get("topics", []),
                     notes=d.get("notes", ""),
                 )
@@ -118,6 +123,7 @@ class UserMemoryStore:
                     "last_seen": profile.last_seen,
                     "message_count": profile.message_count,
                     "known_facts": profile.known_facts,
+                    "relations": profile.relations,
                     "topics": profile.topics,
                     "notes": profile.notes,
                 }
@@ -158,6 +164,43 @@ class UserMemoryStore:
         profile.set_fact(key, value)
         self.save()
         logger.info("用户 %s 事实更新: %s = %s", profile.preferred_name or wxid, key, value)
+
+    def merge_fact(self, wxid: str, key: str, value: str) -> bool:
+        """
+        合并事实：如果已存在相似 key，更新而非覆盖。
+        返回 True 表示有变更。
+        """
+        profile = self.get_or_create(wxid)
+        # 检查是否已存在完全相同的事实
+        if key in profile.known_facts and profile.known_facts[key] == value:
+            return False
+        # 检查是否有相似 key（如 "喜欢" vs "爱好"）
+        similar_keys = {
+            "喜欢": ["爱好", "偏好"],
+            "爱好": ["喜欢", "偏好"],
+            "职业": ["工作", "岗位"],
+            "工作": ["职业", "岗位"],
+        }
+        for existing_key, existing_value in profile.known_facts.items():
+            if existing_value == value:
+                return False  # 值相同，key 不同也无所谓
+            # 相似 key 合并
+            related = similar_keys.get(key, [])
+            if existing_key in related:
+                profile.known_facts[key] = value
+                del profile.known_facts[existing_key]
+                self.save()
+                return True
+
+        profile.set_fact(key, value)
+        self.save()
+        return True
+
+    def add_relation(self, wxid: str, target_wxid: str, relation: str):
+        """记录两个用户之间的关系。"""
+        profile = self.get_or_create(wxid)
+        profile.relations[target_wxid] = relation
+        self.save()
 
     def add_topic(self, wxid: str, topic: str):
         """记录用户讨论过的话题"""
