@@ -138,9 +138,7 @@ class WeFlowClient:
                 if msg.sender_name == self.bot_wxid or msg.sender_name in self.bot_nicknames:
                     continue
 
-                # 只响应 @鼠鼠 的消息
-                if not self.is_at_bot(msg):
-                    continue
+                # 所有群消息都交给回调（非 @ 用于风格学习，@ 用于回复）
 
                 logger.info("Msg: room=%s, sender=%s, text=%s", talker, msg.sender_name, msg.content[:80])
                 if self._callback:
