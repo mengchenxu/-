@@ -23,6 +23,7 @@ class BotConfig:
     name: str = "小助手"
     system_prompt: str = "你是一个有帮助的 AI 助手。"
     reply_cooldown_seconds: int = 3
+    enable_search: bool = True          # 是否启用联网搜索（梗检测）
 
 
 @dataclass
