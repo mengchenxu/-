@@ -81,6 +81,10 @@ def build_llm_context(
                         [(e["name"], e["profile"].preferred_name or e["name"]) for e in entities])
         for e in entities:
             wxid = e["profile"].wxid
+            # 过滤 bot 自己（不要把自己列在"在场的人"里）
+            e_name = e["profile"].preferred_name or e["name"]
+            if e_name in bot_nicknames:
+                continue
             if wxid not in people and e["name"].lower() not in mentioned_set and wxid != speaker_wxid:
                 people[wxid] = {
                     "name": e["profile"].preferred_name or e["name"],
