@@ -63,7 +63,7 @@ def build_llm_context(
             logger.info("发现新群成员: %s", name)
         if profile and profile.wxid != speaker_wxid:
             people[profile.wxid] = {
-                "name": profile.preferred_name or name,
+                "name": profile.get_mention_name() or profile.preferred_name or name,
                 "facts_str": _brief_facts(profile),
             }
 
@@ -82,12 +82,12 @@ def build_llm_context(
         for e in entities:
             wxid = e["profile"].wxid
             # 过滤 bot 自己（不要把自己列在"在场的人"里）
-            e_name = e["profile"].preferred_name or e["name"]
+            e_name = e["profile"].get_mention_name() or e["profile"].preferred_name or e["name"]
             if e_name in bot_nicknames:
                 continue
             if wxid not in people and e["name"].lower() not in mentioned_set and wxid != speaker_wxid:
                 people[wxid] = {
-                    "name": e["profile"].preferred_name or e["name"],
+                    "name": e["profile"].get_mention_name() or e["profile"].preferred_name or e["name"],
                     "facts_str": _brief_facts(e["profile"]),
                     "memories": e.get("memories", []),
                 }
