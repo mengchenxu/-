@@ -115,7 +115,7 @@ class Group:
     last_msg_at: float = 0.0
     msg_count: int = 0
 
-    def add_memory(self, text: str, keywords: List[str] = None, category: str = "fact", importance: int = 3) -> GroupMemory:
+    def add_memory(self, text: str, keywords: Optional[List[str]] = None, category: str = "fact", importance: int = 3) -> GroupMemory:
         mid = uuid.uuid4().hex[:12]
         for m in self.memories:
             if m.text.strip() == text.strip():
@@ -129,7 +129,7 @@ class Group:
         self.memories.append(mem)
         return mem
 
-    def search_memories(self, keywords: list, limit: int = 3) -> list:
+    def search_memories(self, keywords: List[str], limit: int = 3) -> List[GroupMemory]:
         now = time.time()
         scored = []
         for m in self.memories:
@@ -208,11 +208,31 @@ class Store:
                 if nl == alias.lower():
                     return (p, alias)
             return (p, p.mention_name or name)
-        # Step 5: 找不到 → 创建占位 Person，以后会学到真名
+        # Step 5: 找不到 → 创建占位 Person（用唯一 key，以后合并到真 wxid）
         if name and len(name) >= 2:
-            p = self.get_or_create_person(name, name)
+            placeholder_wxid = f"__placeholder__{name}"
+            if placeholder_wxid not in self._people:
+                p = self.get_or_create_person(placeholder_wxid, name)
+            else:
+                p = self._people[placeholder_wxid]
             return (p, name)
         return (None, "")
+
+    def scan_aliases_in_text(self, content: str, exclude_wxids: set = None, bot_names: List[str] = None) -> Dict[str, tuple]:
+        """扫描正文中出现的已知别名，返回 {wxid: (person, matched_alias)}。"""
+        result: Dict[str, tuple] = {}
+        exclude = exclude_wxids or set()
+        bots = set(bot_names or [])
+        for wxid, person in self._people.items():
+            if wxid in exclude or person.mention_name in bots:
+                continue
+            for alias in person.aliases:
+                if alias and len(alias) >= 2 and alias in content:
+                    if alias in bots:
+                        continue
+                    result[wxid] = (person, alias)
+                    break
+        return result
 
     @staticmethod
     def _is_latin_word(full: str, query_lower: str, original: str) -> bool:
@@ -242,12 +262,12 @@ class Store:
         return g.history[-limit:]
 
     # -- 记忆管理 --
-    def add_memory(self, room_id: str, text: str, keywords: list = None,
+    def add_memory(self, room_id: str, text: str, keywords: Optional[List[str]] = None,
                    category: str = "fact", importance: int = 3) -> GroupMemory:
         g = self.get_group(room_id)
         return g.add_memory(text, keywords, category, importance)
 
-    def search_memories(self, room_id: str, keywords: list, limit: int = 3) -> list:
+    def search_memories(self, room_id: str, keywords: List[str], limit: int = 3) -> List[GroupMemory]:
         g = self._groups.get(room_id)
         if not g:
             return []
@@ -286,12 +306,12 @@ class Store:
     # ================================================================
     # JSON Save/Load
     # ================================================================
-    def to_dict(self) -> dict:
-        def fact_to_dict(f: FactEntry) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
+        def fact_to_dict(f: FactEntry) -> Dict[str, Any]:
             return {"key": f.key, "value": f.value, "source": f.source,
                     "confidence": f.confidence, "recorded_at": f.recorded_at, "updated_at": f.updated_at}
 
-        def memory_to_dict(m: GroupMemory) -> dict:
+        def memory_to_dict(m: GroupMemory) -> Dict[str, Any]:
             return {"id": m.id, "text": m.text, "keywords": m.keywords,
                     "category": m.category, "importance": m.importance, "timestamp": m.timestamp}
 
@@ -346,7 +366,7 @@ class Store:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, OSError):
             logger.exception("加载 Store 失败，从空开始: %s", path)
             return store
 

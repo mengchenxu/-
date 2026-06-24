@@ -19,12 +19,12 @@ class EnrichedCtx:
 
 def enrich(parsed: ParsedMsg, store: Store, bot_names: List[str] = None) -> EnrichedCtx | None:
     """充实上下文。非@bot 消息返回 None（调用方仍需记录历史）。"""
-    if bot_names is None:
-        bot_names = []
-    group = store.get_group(parsed.room_id)
     if not parsed.is_at_bot:
         return None
+    if bot_names is None:
+        bot_names = []
 
+    group = store.get_group(parsed.room_id)
     people: Dict[str, dict] = {}
 
     def _is_bot(name: str) -> bool:
@@ -41,21 +41,14 @@ def enrich(parsed: ParsedMsg, store: Store, bot_names: List[str] = None) -> Enri
                 "facts": person.get_fact_strings(),
             }
 
-    # 扫描正文中的已知别名
-    for wxid, person in store._people.items():
-        if wxid in people or wxid == parsed.sender_wxid:
-            continue
-        if _is_bot(person.mention_name):
-            continue
-        for alias in person.aliases:
-            if alias and len(alias) >= 2 and alias in parsed.content:
-                if _is_bot(alias):
-                    continue
-                people[wxid] = {
-                    "name": person.mention_name or alias,
-                    "facts": person.get_fact_strings(),
-                }
-                break
+    # 扫描正文中的已知别名（使用 Store 公开方法）
+    exclude = set(people.keys()) | {parsed.sender_wxid}
+    alias_matches = store.scan_aliases_in_text(parsed.content, exclude_wxids=exclude, bot_names=bot_names)
+    for wxid, (person, alias) in alias_matches.items():
+        people[wxid] = {
+            "name": person.mention_name or alias,
+            "facts": person.get_fact_strings(),
+        }
 
     # 检索相关记忆
     keywords = list(parsed.raw_mentions) + list(people.keys())

@@ -274,3 +274,18 @@ def test_store_save_no_dirname(tmp_path):
     path = str(tmp_path / "sub" / "store.json")
     store.save(path)
     assert Store.load(path).get_person("wxid_x") is not None
+
+
+def test_scan_aliases_in_text():
+    store = Store()
+    p = store.get_or_create_person("wxid_a", "zi_nan")
+    p.add_alias("nan_ge")
+    matches = store.scan_aliases_in_text("nan_ge is here")
+    assert "wxid_a" in matches
+
+
+def test_scan_aliases_excludes_bot():
+    store = Store()
+    store.get_or_create_person("wxid_bot", "shu_shu")
+    matches = store.scan_aliases_in_text("@shu_shu hi", bot_names=["shu_shu"])
+    assert "wxid_bot" not in matches

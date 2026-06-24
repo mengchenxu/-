@@ -58,7 +58,7 @@ def test_enrich_unknown_mention_creates_placeholder():
     ctx = enrich(parsed, store, bot_names=["鼠鼠"])
     assert any("陌生人" in p["name"] for p in ctx.people.values())
     # 占位 Person 应该已被创建
-    assert store.find_person_by_name("陌生人") is not None
+    assert store.get_person("__placeholder__陌生人") is not None
 
 
 def test_enrich_excludes_bot_from_people():

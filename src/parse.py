@@ -47,8 +47,8 @@ def parse(msg_data: dict, bot_names: List[str]) -> Optional[ParsedMsg]:
     if "@chatroom" not in talker:
         return None
 
-    content = (msg_data.get("content", "") or "").strip()
-    raw_content = msg_data.get("rawContent", "") or ""
+    content = (msg_data.get("content", "")).strip()
+    raw_content = msg_data.get("rawContent", "")
     sender = msg_data.get("senderUsername", "") or ""
 
     # 显示名
