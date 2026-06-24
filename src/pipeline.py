@@ -94,12 +94,13 @@ class Pipeline:
             return None
 
         # Phase 3-6: 完整管道（仅 @bot）
-        # 冷却检查
+        # 冷却检查（基于 bot 上次回复时间，非最后消息时间）
         group = self.store.get_group(parsed.room_id)
-        elapsed = time.time() - group.last_msg_at
+        elapsed = time.time() - group.last_reply_at
         if elapsed < self.cooldown:
             logger.debug("Cooling down: %.1fs < %ds", elapsed, self.cooldown)
             return None
+        group.last_reply_at = time.time()
 
         # Phase 3: Prompt
         messages = build_prompt(enriched, self.config.bot.system_prompt)

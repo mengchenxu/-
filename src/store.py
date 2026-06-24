@@ -113,6 +113,7 @@ class Group:
     memories: List[GroupMemory] = field(default_factory=list)
     history: List[ChatMsg] = field(default_factory=list)
     last_msg_at: float = 0.0
+    last_reply_at: float = 0.0  # bot 上次回复时间（冷却用）
     msg_count: int = 0
 
     def add_memory(self, text: str, keywords: Optional[List[str]] = None, category: str = "fact", importance: int = 3) -> GroupMemory:

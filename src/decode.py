@@ -131,7 +131,7 @@ def _apply_remember(person, key: str, value: str, mutations: dict):
 def _detect_correction(text: str, enriched: EnrichedCtx, store: Store) -> tuple[str, dict]:
     """检测纠正信号（'我不叫xxx', '你记错了' 等）。"""
     mutations: dict = {}
-    wxid = enriched.parsed.sender_wxid or enriched.parsed.sender_name
+    wxid = enriched.parsed.sender_wxid
 
     for pat in _CORRECTION_PATTERNS:
         for m in re.finditer(pat, text):
