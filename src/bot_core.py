@@ -169,10 +169,14 @@ class BotCore:
         return False
 
     def _clean_at_text(self, msg: WeFlowMessage) -> str:
-        """去掉 @bot 部分，返回干净的用户问题。"""
+        """只去掉 @bot 自身，保留用户 @其他人的 mention（让 LLM 看到完整引用关系）。"""
         text = msg.content.strip()
         import re
-        text = re.sub(r"@[^\s]+\s*", "", text).strip()
+        # 去掉 WeChat mention 分隔符（U+2005 Four-Per-Em Space）
+        text = text.replace(' ', '')
+        # 只去掉 @bot 名字，保留 @其他人的部分
+        for nick in [self.bot_name]:
+            text = re.sub(rf'@{re.escape(nick)}\s*', '', text).strip()
         return text
 
     def _group_allowed(self, roomid: str) -> bool:
