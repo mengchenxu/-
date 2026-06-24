@@ -40,6 +40,16 @@ class Person:
     first_seen: float = 0.0
     last_seen: float = 0.0
 
+    @property
+    def preferred_name(self) -> str:
+        """向后兼容旧代码——delegate 到 mention_name。"""
+        return self.mention_name
+
+    @preferred_name.setter
+    def preferred_name(self, value: str):
+        if value and not value.startswith("wxid_"):
+            self.mention_name = value
+
     def add_alias(self, name: str):
         name = name.strip()
         if name and name not in self.aliases:
@@ -158,6 +168,14 @@ class Store:
     # -- Person --
     def get_person(self, wxid: str) -> Optional[Person]:
         return self._people.get(wxid)
+
+    # 向后兼容旧 weflow_client API
+    def get(self, wxid: str) -> Optional[Person]:
+        return self.get_person(wxid)
+
+    def record_message(self, wxid: str, display_name: str = ""):
+        """向后兼容 — 记录一次发言（调用 get_or_create_person）。"""
+        self.get_or_create_person(wxid, display_name)
 
     def get_or_create_person(self, wxid: str, name: str = "") -> Person:
         if wxid not in self._people:
