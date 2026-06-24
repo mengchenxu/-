@@ -13,6 +13,16 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class FactEntry:
+    """一条带置信度的事实记录"""
+    value: str
+    source: str = ""           # "user_stated" | "manual" | "llm_extract" | "auto_extract" | "correction" | "legacy"
+    confidence: float = 0.0
+    recorded_at: float = 0.0
+    updated_at: float = 0.0
+
+
+@dataclass
 class UserProfile:
     """群成员档案"""
     wxid: str
@@ -22,7 +32,7 @@ class UserProfile:
     first_seen: float = 0.0
     last_seen: float = 0.0
     message_count: int = 0
-    known_facts: Dict[str, str] = field(default_factory=dict)  # {"职业": "程序员", "喜欢": "猫"}
+    known_facts: Dict[str, 'FactEntry'] = field(default_factory=dict)  # {"立场": FactEntry(...)}
     relations: Dict[str, str] = field(default_factory=dict)     # {"wxid_xxx": "同事", "wxid_yyy": "朋友"}
     topics: List[str] = field(default_factory=list)             # 常讨论的话题
     notes: str = ""                                              # LLM 可更新的自由格式备注
@@ -58,9 +68,38 @@ class UserProfile:
         self.last_seen = now
         self.message_count += 1
 
-    def set_fact(self, key: str, value: str):
-        """设置一个已知事实"""
-        self.known_facts[key] = value
+    def set_fact(self, key: str, value: str, source: str = "manual", confidence: float = 0.8):
+        """设置一个已知事实（带置信度）。"""
+        now = time.time()
+        if key in self.known_facts:
+            existing = self.known_facts[key]
+            if existing.value == value:
+                existing.updated_at = now
+                return
+            # 冲突：新值置信度 >= 旧值时才覆盖
+            if confidence < existing.confidence:
+                return  # 低置信度不能覆盖高置信度
+            # 旧值移入历史
+            self.known_facts[key] = FactEntry(
+                value=value, source=source, confidence=confidence,
+                recorded_at=existing.recorded_at, updated_at=now,
+            )
+        else:
+            self.known_facts[key] = FactEntry(
+                value=value, source=source, confidence=confidence,
+                recorded_at=now, updated_at=now,
+            )
+
+    def correct_fact(self, key: str, new_value: str):
+        """强制修正事实（来自用户纠正信号），无视置信度。"""
+        now = time.time()
+        old = self.known_facts.get(key)
+        old_value = old.value if old else ""
+        self.known_facts[key] = FactEntry(
+            value=new_value, source="correction", confidence=0.95,
+            recorded_at=now, updated_at=now,
+        )
+        return old_value
 
     def get_context_summary(self) -> str:
         """生成 LLM 可用的用户摘要"""
@@ -69,7 +108,7 @@ class UserProfile:
         if display:
             parts.append(f"名字: {display}")
         if self.known_facts:
-            facts = ", ".join(f"{k}={v}" for k, v in self.known_facts.items())
+            facts = ", ".join(f"{k}={v.value}" for k, v in self.known_facts.items())
             parts.append(f"已知: {facts}")
         if self.relations:
             rel_text = ", ".join(f"与{rid}关系={rel}" for rid, rel in self.relations.items())
@@ -102,14 +141,35 @@ class UserMemoryStore:
     # 持久化
     # ----------------------------------------------------------------
     def load(self):
-        """从 JSON 文件加载所有用户档案"""
+        """从 JSON 文件加载所有用户档案，自动迁移旧格式事实。"""
         if not os.path.exists(self.file_path):
             logger.info("用户记忆文件不存在，从空开始: %s", self.file_path)
             return
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            migrated = 0
             for wxid, d in data.items():
+                facts_raw = d.get("known_facts", {})
+                facts: dict[str, FactEntry] = {}
+                for k, v in facts_raw.items():
+                    if isinstance(v, dict) and "value" in v:
+                        # 新格式: {"value": "...", "source": "...", ...}
+                        facts[k] = FactEntry(
+                            value=v.get("value", ""),
+                            source=v.get("source", "legacy"),
+                            confidence=v.get("confidence", 0.5),
+                            recorded_at=v.get("recorded_at", 0.0),
+                            updated_at=v.get("updated_at", 0.0),
+                        )
+                    else:
+                        # 旧格式: "key": "value" → 迁移
+                        facts[k] = FactEntry(
+                            value=str(v), source="legacy", confidence=0.5,
+                            recorded_at=0.0, updated_at=0.0,
+                        )
+                        migrated += 1
+
                 profile = UserProfile(
                     wxid=wxid,
                     mention_name=d.get("mention_name", ""),
@@ -118,7 +178,7 @@ class UserMemoryStore:
                     first_seen=d.get("first_seen", 0.0),
                     last_seen=d.get("last_seen", 0.0),
                     message_count=d.get("message_count", 0),
-                    known_facts=d.get("known_facts", {}),
+                    known_facts=facts,
                     relations=d.get("relations", {}),
                     topics=d.get("topics", []),
                     notes=d.get("notes", ""),
@@ -127,6 +187,9 @@ class UserMemoryStore:
                     aliases=d.get("aliases", []),
                 )
                 self._users[wxid] = profile
+            if migrated:
+                logger.info("已迁移 %d 个旧格式事实到新格式", migrated)
+                self.save()  # 立即写回新格式
             logger.info("已加载 %d 个用户档案", len(self._users))
         except Exception:
             logger.exception("加载用户记忆失败，从空开始")
@@ -136,6 +199,15 @@ class UserMemoryStore:
         try:
             data = {}
             for wxid, profile in self._users.items():
+                facts_json = {}
+                for k, v in profile.known_facts.items():
+                    facts_json[k] = {
+                        "value": v.value,
+                        "source": v.source,
+                        "confidence": v.confidence,
+                        "recorded_at": v.recorded_at,
+                        "updated_at": v.updated_at,
+                    }
                 data[wxid] = {
                     "wxid": profile.wxid,
                     "mention_name": profile.mention_name,
@@ -144,7 +216,7 @@ class UserMemoryStore:
                     "first_seen": profile.first_seen,
                     "last_seen": profile.last_seen,
                     "message_count": profile.message_count,
-                    "known_facts": profile.known_facts,
+                    "known_facts": facts_json,
                     "relations": profile.relations,
                     "topics": profile.topics,
                     "notes": profile.notes,
@@ -183,42 +255,35 @@ class UserMemoryStore:
         if profile.message_count % 10 == 0:
             self.save()
 
-    def update_fact(self, wxid: str, key: str, value: str):
-        """更新用户的一个已知事实"""
+    def update_fact(self, wxid: str, key: str, value: str, source: str = "manual", confidence: float = 0.8):
+        """手动更新事实（来自 /remember 命令）。"""
         profile = self.get_or_create(wxid)
-        profile.set_fact(key, value)
+        profile.set_fact(key, value, source, confidence)
         self.save()
         logger.info("用户 %s 事实更新: %s = %s", profile.preferred_name or wxid, key, value)
 
-    def merge_fact(self, wxid: str, key: str, value: str) -> bool:
+    def merge_fact(self, wxid: str, key: str, value: str, source: str = "llm_extract", confidence: float = 0.6) -> bool:
         """
-        合并事实：如果已存在相似 key，更新而非覆盖。
-        返回 True 表示有变更。
+        合并事实：LLM 提取的事实（默认置信度 0.6）。
+        低置信度不能覆盖高置信度。返回 True 表示有变更。
         """
         profile = self.get_or_create(wxid)
-        # 检查是否已存在完全相同的事实
-        if key in profile.known_facts and profile.known_facts[key] == value:
-            return False
-        # 检查是否有相似 key（如 "喜欢" vs "爱好"）
-        similar_keys = {
-            "喜欢": ["爱好", "偏好"],
-            "爱好": ["喜欢", "偏好"],
-            "职业": ["工作", "岗位"],
-            "工作": ["职业", "岗位"],
-        }
-        for existing_key, existing_value in profile.known_facts.items():
-            if existing_value == value:
-                return False  # 值相同，key 不同也无所谓
-            # 相似 key 合并
-            related = similar_keys.get(key, [])
-            if existing_key in related:
-                profile.known_facts[key] = value
-                del profile.known_facts[existing_key]
-                self.save()
-                return True
+        existing_entry = profile.known_facts.get(key)
 
-        profile.set_fact(key, value)
+        if existing_entry:
+            if existing_entry.value == value:
+                existing_entry.updated_at = time.time()
+                return False
+            # 低置信度不能覆盖高置信度
+            if confidence < existing_entry.confidence:
+                logger.debug("事实冲突拒绝: %s=%s (conf=%.1f) 不能覆盖 (conf=%.1f)",
+                           key, value, confidence, existing_entry.confidence)
+                return False
+
+        profile.set_fact(key, value, source, confidence)
         self.save()
+        logger.info("用户 %s 事实更新: %s = %s (source=%s, conf=%.1f)",
+                    profile.preferred_name or wxid, key, value, source, confidence)
         return True
 
     def add_relation(self, wxid: str, target_wxid: str, relation: str):

@@ -138,12 +138,12 @@ def build_llm_context(
 
 
 def _brief_facts(profile) -> str:
-    """极简事实摘要，最多 60 字。"""
+    """极简事实摘要，最多 80 字。"""
     if not profile or not profile.known_facts:
         return ""
-    # 取前 3 条事实，每条截到 20 字
     items = []
-    for k, v in list(profile.known_facts.items())[:3]:
+    for k, entry in list(profile.known_facts.items())[:3]:
+        v = entry.value if hasattr(entry, 'value') else str(entry)
         v_short = v[:20] + ("…" if len(v) > 20 else "")
         items.append(f"{k}={v_short}")
     return ", ".join(items)[:80]
@@ -293,7 +293,7 @@ def auto_extract_facts(
         if match and match.group(1).strip():
             value = match.group(1).strip()
             if len(value) <= 20:
-                user_memory.merge_fact(speaker_wxid, fact_key, value)
+                user_memory.merge_fact(speaker_wxid, fact_key, value, source="auto_extract", confidence=0.4)
                 logger.info("自动提取事实: %s=%s (用户 %s)", fact_key, value, speaker_wxid)
 
     # 外号检测：从用户消息和 LLM 回复中提取外号
