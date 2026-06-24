@@ -72,18 +72,33 @@ def test_build_prompt_includes_history():
     assert "reply1" in user_msg
 
 
-def test_build_prompt_includes_mentionable():
+def test_build_prompt_truncates_history_to_10():
+    store = Store()
+    store.get_group("123@chatroom")
+    for i in range(15):
+        store.add_to_history("123@chatroom", ChatMsg(role="user", content=f"msg{i}", sender_name="a"))
+
     parsed = ParsedMsg(
-        room_id="123@chatroom", sender_wxid="wxid_a", sender_name="贯一",
-        content="test", raw_mentions=[], is_at_bot=True,
+        room_id="123@chatroom", sender_wxid="wxid_a", sender_name="a",
+        content="latest", raw_mentions=[], is_at_bot=True,
     )
     enriched = EnrichedCtx(
-        parsed=parsed,
-        mentionable_names=["子南", "咚咚"],
-        history=[],
+        parsed=parsed, history=store.get_history("123@chatroom", limit=15),
     )
     messages = build_prompt(enriched, "你是鼠鼠")
     user_msg = messages[-1]["content"]
-    assert "子南" in user_msg
-    assert "咚咚" in user_msg
-    assert "@名字" in user_msg  # 格式指令
+    # 应该只有最近 10 条
+    assert "msg14" in user_msg
+    assert "msg5" in user_msg
+    assert "msg4" not in user_msg  # 超出 10 条
+
+
+def test_build_prompt_none_sender_name():
+    parsed = ParsedMsg(
+        room_id="123@chatroom", sender_wxid="wxid_a", sender_name=None,
+        content="test", raw_mentions=[], is_at_bot=True,
+    )
+    enriched = EnrichedCtx(parsed=parsed, history=[])
+    messages = build_prompt(enriched, "你是鼠鼠")
+    user_msg = messages[-1]["content"]
+    assert "@未知" in user_msg  # fallback
