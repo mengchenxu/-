@@ -41,15 +41,22 @@ def _extract_mentions(raw_content: str, content: str) -> List[str]:
     return mentions
 
 
-def parse(msg_data: dict, bot_names: List[str]) -> Optional[ParsedMsg]:
-    """将 WeFlow 原始消息字典解析为 ParsedMsg。私聊返回 None。"""
-    talker = msg_data.get("talker", "") or msg_data.get("session_id", "")
+def parse(msg, bot_names: List[str]) -> Optional[ParsedMsg]:
+    """将 WeFlowMessage 或原始 dict 解析为 ParsedMsg。私聊返回 None。"""
+    # 兼容 WeFlowMessage 对象和原始 dict
+    if hasattr(msg, 'session_id'):
+        talker = msg.session_id
+        content = (msg.content or "").strip()
+        raw_content = msg.raw.get("rawContent", "") if hasattr(msg, 'raw') else ""
+        sender = msg.sender_name or ""
+    else:
+        talker = msg.get("talker", "") or msg.get("session_id", "")
+        content = (msg.get("content", "") or "").strip()
+        raw_content = msg.get("rawContent", "") or ""
+        sender = msg.get("senderUsername", "") or ""
+
     if "@chatroom" not in talker:
         return None
-
-    content = (msg_data.get("content", "")).strip()
-    raw_content = msg_data.get("rawContent", "")
-    sender = msg_data.get("senderUsername", "") or ""
 
     # 显示名
     if ":\n" in raw_content:
