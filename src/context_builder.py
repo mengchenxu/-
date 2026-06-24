@@ -21,137 +21,19 @@ def build_llm_context(
     search_result: str = "",
 ) -> str:
     """
-    构建注入到 LLM user message 中的完整上下文。
-    按优先级组装：群背景 → 相关记忆 → 当前话题 → 参与者 → 热梗 → 最近对话 → 消息内容
+    构建注入到 LLM user message 中的精简上下文。
+    优先级：最近对话 > 当前消息 > 在场的人 > 群聊摘要 > 格式提醒
     """
     parts = []
     speaker_wxid = msg.sender_name
     speaker_name = msg.display_name or msg.sender_name
 
-    # ---- 1. 群聊背景 ----
-    if session.group_context:
-        parts.append(f"[群聊背景]\n{session.group_context}")
-
-    # ---- 1.5 群内风格 ----
-    style_parts = []
-    if session.group_style:
-        style_parts.append(f"整体风格: {session.group_style}")
-    if session.top_words:
-        style_parts.append(f"高频词: {', '.join(session.top_words[:10])}")
-    if session.top_emojis:
-        style_parts.append(f"常用表情: {' '.join(session.top_emojis[:5])}")
-    if style_parts:
-        parts.append("[群内风格]\n" + "\n".join(style_parts))
-
-    # ---- 1.6 核心成员风格 ----
-    if session.active_users:
-        styled_users = []
-        for wxid in session.active_users:
-            profile = user_memory.get(wxid)
-            if profile and profile.speaking_style:
-                name = profile.preferred_name or wxid
-                styled_users.append(f"  {name}: {profile.speaking_style}")
-        if styled_users:
-            parts.append("[核心成员风格]\n" + "\n".join(styled_users))
-
-    # ---- 2. 相关情景记忆 ----
-    if group_memory and session.topic_keywords:
-        try:
-            relevant = group_memory.search(session.group_id, session.topic_keywords, limit=3)
-            if relevant:
-                mem_lines = []
-                for mem in relevant:
-                    mem_lines.append(f"  · {mem.content}")
-                parts.append("[相关记忆]\n" + "\n".join(mem_lines))
-        except Exception:
-            pass  # 检索失败不阻塞对话
-
-    # ---- 3. 当前话题 ----
-    if session.topic_summary:
-        parts.append(f"[当前话题]\n{session.topic_summary}")
-
-    # ---- 4. 当前发言者 + 被 @ 的人 ----
-    speaker_ctx = user_memory.get_user_context(speaker_wxid)
-    if speaker_ctx:
-        parts.append(f"当前发言者 — {speaker_ctx}")
-    else:
-        parts.append(f"当前发言者 — {speaker_name}")
-
-    mentioned_others = [m for m in msg.mentions if m not in bot_nicknames]
-    if mentioned_others:
-        mentioned_info = []
-        for name in mentioned_others:
-            profile = user_memory.find_by_name(name)
-            if profile is None:
-                # 找不到 → 新建并立即保存（首次被 @的群成员）
-                user_memory.get_or_create(name, name)
-                user_memory.save()
-                profile = user_memory.get(name)
-                logger.info("发现新群成员: %s", name)
-            if profile and profile.wxid != speaker_wxid:
-                display = profile.preferred_name or name
-                ctx = profile.get_context_summary()
-                if ctx:
-                    mentioned_info.append(f"  @{display} — {ctx}")
-                else:
-                    mentioned_info.append(f"  @{display}")
-            elif profile and profile.wxid == speaker_wxid:
-                pass  # 发言人 @ 自己，跳过
-            else:
-                mentioned_info.append(f"  @{name}")
-        if mentioned_info:
-            parts.append("消息中 @了:\n" + "\n".join(mentioned_info))
-
-    # ---- 4.5 实体解析：扫描消息正文中提到的已知群成员 ----
-    entities = []
-    mentionable_names = []
-    # 使用所有已知用户（而非 active_users），确保重启后也能识别
-    all_wxids = user_memory.get_all_wxids()
-    if all_wxids:
-        entities, mentionable_names = _resolve_entities_in_message(
-            msg.content, user_memory, all_wxids,
-            group_memory, msg.roomid
-        )
-        # 过滤掉已在显式 @了 列表里的人（避免重复）
-        mentioned_set = {m.lower() for m in mentioned_others}
-        new_entities = [e for e in entities if e["name"].lower() not in mentioned_set]
-        if entities:
-            logger.info("实体解析: 在消息中扫到 %d 个已知成员: %s",
-                        len(entities),
-                        [(e["name"], e["profile"].preferred_name or e["name"]) for e in entities])
-        if new_entities:
-            entity_lines = []
-            for e in new_entities:
-                name = e["profile"].preferred_name or e["name"]
-                ctx = e["profile"].get_context_summary()
-                line = f"  @{name}"
-                if ctx:
-                    line += f" — {ctx}"
-                entity_lines.append(line)
-                # 附上相关群记忆（让 LLM 知道"这人是干嘛的"）
-                if e.get("memories"):
-                    for mem in e["memories"]:
-                        entity_lines.append(f"    相关: {mem.content}")
-            if entity_lines:
-                parts.append("[消息中可能提到的人]\n" + "\n".join(entity_lines))
-                logger.info("实体解析注入上下文: %d 人（去重后）", len(new_entities))
-
-    # ---- 5. 群内其他活跃成员 ----
-    if session.active_users:
-        other_users = session.active_users - {speaker_wxid}
-        if other_users:
-            others_ctx = user_memory.get_users_context(list(other_users))
-            if others_ctx:
-                parts.append(others_ctx)
-
-    # ---- 6. 热梗参考（搜索结果） ----
-    if search_result:
-        parts.append(f"[热梗参考]\n{search_result}")
-
-    # ---- 7. 最近对话 ----
+    # ================================================================
+    # 1. 最近对话 — LLM 看到的第一样东西，像真人一样先看聊天记录
+    # ================================================================
     if session.history:
         recent = []
-        for m in list(session.history)[-6:]:  # 最近 3 轮
+        for m in list(session.history)[-16:]:  # 最近 8 轮
             role_label = "用户" if m.role == "user" else "鼠鼠"
             name = getattr(m, 'sender_name', '') or ''
             tag = f"{role_label}({name})" if name else role_label
@@ -159,8 +41,88 @@ def build_llm_context(
         if recent:
             parts.append("[最近对话]\n" + "\n".join(recent))
 
-    # ---- 8. 动态格式指令（近因指令，确保 LLM 用 @名字） ----
-    # 当前发言人由 at_sender 自动 @，LLM 不需要在开头再写一次
+    # ================================================================
+    # 2. 当前消息 — 紧接对话之后
+    # ================================================================
+    parts.append(f"[消息]\n@{speaker_name}: {msg.content}")
+
+    # ================================================================
+    # 3. 在场的人 — 合并实体解析 + 显式 @ + 群成员，每人一行极简格式
+    # ================================================================
+    mentioned_others = [m for m in msg.mentions if m not in bot_nicknames]
+    mentioned_set = {m.lower() for m in mentioned_others}
+
+    # 显式 @ 的人
+    people: dict[str, dict] = {}  # wxid_or_name -> {name, facts_str}
+    for name in mentioned_others:
+        profile = user_memory.find_by_name(name)
+        if profile is None:
+            user_memory.get_or_create(name, name)
+            user_memory.save()
+            profile = user_memory.get(name)
+            logger.info("发现新群成员: %s", name)
+        if profile and profile.wxid != speaker_wxid:
+            people[profile.wxid] = {
+                "name": profile.preferred_name or name,
+                "facts_str": _brief_facts(profile),
+            }
+
+    # 实体解析扫到的人
+    entities = []
+    all_wxids = user_memory.get_all_wxids()
+    if all_wxids:
+        entities, _ = _resolve_entities_in_message(
+            msg.content, user_memory, all_wxids,
+            group_memory, msg.roomid
+        )
+        if entities:
+            logger.info("实体解析: %d 人 — %s",
+                        len(entities),
+                        [(e["name"], e["profile"].preferred_name or e["name"]) for e in entities])
+        for e in entities:
+            wxid = e["profile"].wxid
+            if wxid not in people and e["name"].lower() not in mentioned_set and wxid != speaker_wxid:
+                people[wxid] = {
+                    "name": e["profile"].preferred_name or e["name"],
+                    "facts_str": _brief_facts(e["profile"]),
+                    "memories": e.get("memories", []),
+                }
+
+    if people:
+        people_lines = []
+        for wxid, info in people.items():
+            line = f"  @{info['name']}"
+            if info["facts_str"]:
+                line += f" — {info['facts_str']}"
+            people_lines.append(line)
+            # 相关记忆（极简，最多 1 条）
+            for mem in (info.get("memories") or [])[:1]:
+                people_lines.append(f"    ∟ {mem.content}")
+        parts.append("[在场的人]\n" + "\n".join(people_lines))
+
+    # ================================================================
+    # 4. 群聊摘要 — 合并 群背景 + 当前话题 + 相关记忆
+    # ================================================================
+    summary_parts = []
+    if session.topic_summary:
+        summary_parts.append(session.topic_summary)
+    if session.group_context:
+        summary_parts.append(session.group_context)
+    if group_memory and session.topic_keywords:
+        try:
+            relevant = group_memory.search(session.group_id, session.topic_keywords, limit=2)
+            for mem in relevant:
+                summary_parts.append(mem.content)
+        except Exception:
+            pass
+    if search_result:
+        summary_parts.append(f"热梗参考: {search_result}")
+    if summary_parts:
+        parts.append("[群聊摘要]\n" + "；".join(summary_parts[:5]))
+
+    # ================================================================
+    # 5. 格式提醒 — 一行
+    # ================================================================
     all_mentionable = [m for m in mentioned_others if m.lower() != speaker_name.lower()]
     for e in entities:
         name = e["profile"].preferred_name or e["name"]
@@ -168,16 +130,23 @@ def build_llm_context(
             all_mentionable.append(name)
     if all_mentionable:
         parts.append(
-            f"[重要：回复格式]\n"
-            f"回复对象 @{speaker_name} 已由系统自动处理，你无需在回复开头写 @{speaker_name}。\n"
-            f"如果你在正文中提到以下其他群成员，在提到的地方用 @名字 格式（内联 mention）：{', '.join(all_mentionable)}\n"
-            f"示例: \"宁这转进如风啊😅 刚才还香炉了，现在又变成想她了，宁这抽象程度已经超越 @贯一 的cos马好吧💧\""
+            f"[格式] 回复对象 @{speaker_name} 系统自动处理。"
+            f"正文提到其他人用 @名字: {', '.join(all_mentionable)}"
         )
 
-    # ---- 9. 当前消息 ----
-    parts.append(f"[消息内容]\n{msg.content}")
-
     return "\n\n".join(parts)
+
+
+def _brief_facts(profile) -> str:
+    """极简事实摘要，最多 60 字。"""
+    if not profile or not profile.known_facts:
+        return ""
+    # 取前 3 条事实，每条截到 20 字
+    items = []
+    for k, v in list(profile.known_facts.items())[:3]:
+        v_short = v[:20] + ("…" if len(v) > 20 else "")
+        items.append(f"{k}={v_short}")
+    return ", ".join(items)[:80]
 
 
 # ----------------------------------------------------------------
