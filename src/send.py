@@ -1,7 +1,11 @@
 """发送阶段 — UIA 内联 @mention 发送"""
+import ctypes
 import logging
 import re
+import threading
 import time
+
+import pyperclip
 
 from src.decode import DecodedReply
 
@@ -14,21 +18,42 @@ VK_RETURN = 0x0D
 VK_SHIFT = 0x10
 VK_AT = 0x32  # Shift+2
 
+_SEND_LOCK = threading.Lock()
 
-def _press(key): import ctypes; ctypes.windll.user32.keybd_event(key, 0, 0, 0)
-def _release(key): import ctypes; ctypes.windll.user32.keybd_event(key, 0, 2, 0)
-def _tap(key): _press(key); _release(key)
+
+def _press(key):
+    ctypes.windll.user32.keybd_event(key, 0, 0, 0)
+
+
+def _release(key):
+    ctypes.windll.user32.keybd_event(key, 0, 2, 0)
+
+
+def _tap(key):
+    _press(key)
+    _release(key)
+
+
 def _paste():
-    import pyperclip; _press(VK_CONTROL); _tap(VK_V); _release(VK_CONTROL)
-def _enter(): _tap(VK_RETURN)
-def _type_at(): _press(VK_SHIFT); _tap(VK_AT); _release(VK_SHIFT)
+    _press(VK_CONTROL)
+    _tap(VK_V)
+    _release(VK_CONTROL)
+
+
+def _enter():
+    _tap(VK_RETURN)
+
+
+def _type_at():
+    _press(VK_SHIFT)
+    _tap(VK_AT)
+    _release(VK_SHIFT)
 
 
 def _at_mention(name: str):
     """模拟键盘 @选人。"""
     _type_at()
     time.sleep(0.2)
-    import pyperclip
     pyperclip.copy(name)
     time.sleep(0.05)
     _paste()
@@ -43,7 +68,7 @@ def _focus_wechat() -> bool:
         hwnd_console = ctypes.windll.kernel32.GetConsoleWindow()
         if hwnd_console:
             ctypes.windll.user32.ShowWindow(hwnd_console, 6)
-    except Exception:
+    except OSError:
         pass
     time.sleep(0.1)
 
@@ -65,10 +90,7 @@ def _focus_wechat() -> bool:
 
 def send(reply: DecodedReply, room_id: str, at_sender: str) -> bool:
     """内联 @mention 发送。at_sender 开头，正文 @在出现位置实时转键盘@。"""
-    import threading
-    lock = threading.Lock()
-
-    with lock:
+    with _SEND_LOCK:
         if not _focus_wechat():
             logger.error("WeChat window not found")
             return False
@@ -78,13 +100,12 @@ def send(reply: DecodedReply, room_id: str, at_sender: str) -> bool:
                 _at_mention(at_sender.strip())
                 time.sleep(0.3)
 
-            # 2. 内联 @mention：按 @名字 拆分，交替粘贴文字和 @人
+            # 2. 内联 @mention
             text = reply.clean_text
             pattern = r'@([a-zA-Z][a-zA-Z0-9 ]*(?:\s+[a-zA-Z][a-zA-Z0-9 ]*)*|[一-鿿぀-ゟ가-힯]{2,4})'
             segments = re.split(pattern, text)
 
             inline_count = 0
-            import pyperclip
             for i, seg in enumerate(segments):
                 if i % 2 == 0:
                     if seg.strip():

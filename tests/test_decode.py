@@ -1,6 +1,6 @@
 """Decode 阶段测试"""
 import pytest
-from src.decode import decode, DecodedReply
+from src.decode import decode
 from src.enrich import EnrichedCtx
 from src.parse import ParsedMsg
 from src.store import Store

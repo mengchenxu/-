@@ -74,7 +74,7 @@ def decode(raw_reply: str, enriched: EnrichedCtx, store: Store) -> DecodedReply:
     return DecodedReply(clean_text=clean, at_mentions=at_mentions, mutations=mutations)
 
 
-def _extract_remember(text: str, enriched: EnrichedCtx, store: Store) -> tuple:
+def _extract_remember(text: str, enriched: EnrichedCtx, store: Store) -> tuple[str, dict]:
     """提取 /remember @name key: value 指令。"""
     mutations: dict = {}
     pattern = r'/remember\s+(?:@(\S+)\s+)?(.+?)\s*:\s*(.+)'
@@ -89,17 +89,12 @@ def _extract_remember(text: str, enriched: EnrichedCtx, store: Store) -> tuple:
         if at_name:
             person, _ = store.resolve_name(at_name)
             if person:
-                person.add_fact(key, value, source="manual", confidence=0.8)
-                mutations.setdefault("add_facts", {}).setdefault(person.wxid, []).append(
-                    (key, value, "manual", 0.8))
+                _apply_remember(person, key, value, mutations)
         else:
-            # 默认记在当前发言者身上
             wxid = enriched.parsed.sender_wxid
             person = store.get_person(wxid)
             if person:
-                person.add_fact(key, value, source="manual", confidence=0.8)
-                mutations.setdefault("add_facts", {}).setdefault(wxid, []).append(
-                    (key, value, "manual", 0.8))
+                _apply_remember(person, key, value, mutations)
         return ""
 
     clean = re.sub(pattern, _replacer, text)
@@ -107,7 +102,7 @@ def _extract_remember(text: str, enriched: EnrichedCtx, store: Store) -> tuple:
     return clean.strip(), mutations
 
 
-def _extract_context(text: str, enriched: EnrichedCtx) -> tuple:
+def _extract_context(text: str, enriched: EnrichedCtx) -> tuple[str, str | None]:
     """提取 /context 群背景更新指令。"""
     pattern = r'/context\s+(.+?)(?:\n|$)'
     context_text: str | None = None
@@ -122,7 +117,18 @@ def _extract_context(text: str, enriched: EnrichedCtx) -> tuple:
     return clean.strip(), context_text
 
 
-def _detect_correction(text: str, enriched: EnrichedCtx, store: Store) -> tuple:
+def _apply_remember(person, key: str, value: str, mutations: dict):
+    """根据 key 类型写入事实或外号。"""
+    if key.strip() in ("外号", "别名", "绰号"):
+        person.add_alias(value)
+        mutations.setdefault("add_aliases", {}).setdefault(person.wxid, []).append(value)
+    else:
+        person.add_fact(key, value, source="manual", confidence=0.8)
+        mutations.setdefault("add_facts", {}).setdefault(person.wxid, []).append(
+            (key, value, "manual", 0.8))
+
+
+def _detect_correction(text: str, enriched: EnrichedCtx, store: Store) -> tuple[str, dict]:
     """检测纠正信号（'我不叫xxx', '你记错了' 等）。"""
     mutations: dict = {}
     wxid = enriched.parsed.sender_wxid or enriched.parsed.sender_name
@@ -130,14 +136,26 @@ def _detect_correction(text: str, enriched: EnrichedCtx, store: Store) -> tuple:
     for pat in _CORRECTION_PATTERNS:
         for m in re.finditer(pat, text):
             group1 = m.group(1) if m.lastindex and m.lastindex >= 1 else None
+            matched = m.group(0)
+            person = store.get_person(wxid)
+            if not person:
+                continue
             if group1 and len(group1) <= 10:
-                # "我不叫小乐" → 找 wxid 的人，修正名字相关事实
-                person = store.get_person(wxid)
-                if person:
-                    person.correct_fact("名字", group1)
-                    mutations.setdefault("correct_facts", {}).setdefault(wxid, []).append(
-                        ("名字", group1))
-            elif m.group(0) in ("你记错了",):
-                # "你记错了" — 标记但没有具体修正内容
-                pass
+                # "我不叫小乐" → 找 facts 中包含旧值的 key
+                old_value = group1
+                found_key = None
+                for f in person.facts:
+                    if old_value in f.value:
+                        found_key = f.key
+                        break
+                if not found_key:
+                    found_key = "名字"
+                person.correct_fact(found_key, old_value)
+                mutations.setdefault("correct_facts", {}).setdefault(wxid, []).append(
+                    (found_key, old_value))
+            elif matched in ("你记错了", "我没说过"):
+                # 模糊纠正——标记最新事实为待修正
+                if person.facts:
+                    latest = person.facts[-1]
+                    latest.source = "needs_review"
     return text, mutations
