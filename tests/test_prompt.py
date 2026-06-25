@@ -1,6 +1,6 @@
 """Prompt 组装测试"""
 import pytest
-from src.prompt import build_prompt
+from src.prompt import build_prompt, build_extraction_prompt
 from src.enrich import EnrichedCtx
 from src.parse import ParsedMsg
 from src.store import Store, ChatMsg, GroupMemory
@@ -119,3 +119,57 @@ def test_build_prompt_none_sender_name():
     messages = build_prompt(enriched, "你是鼠鼠")
     user_msg = messages[-1]["content"]
     assert "@未知" in user_msg  # fallback
+
+
+# ============================================================
+# build_extraction_prompt 测试
+# ============================================================
+def test_extraction_prompt_structure():
+    """返回 [system, user] 结构"""
+    msgs = [ChatMsg(role="user", content="我下周去日本", sender_name="子南")]
+    result = build_extraction_prompt(msgs)
+    assert len(result) == 2
+    assert result[0]["role"] == "system"
+    assert result[1]["role"] == "user"
+
+
+def test_extraction_prompt_includes_messages():
+    """user prompt 包含原始消息内容"""
+    msgs = [
+        ChatMsg(role="user", content="我下周去日本", sender_name="子南"),
+        ChatMsg(role="user", content="羡慕", sender_name="贯一"),
+    ]
+    result = build_extraction_prompt(msgs)
+    user_msg = result[1]["content"]
+    assert "下周去日本" in user_msg
+    assert "子南" in user_msg
+
+
+def test_extraction_prompt_requests_json_output():
+    """prompt 要求 JSON 输出"""
+    msgs = [ChatMsg(role="user", content="hello", sender_name="test")]
+    result = build_extraction_prompt(msgs)
+    user_msg = result[1]["content"]
+    assert "JSON" in user_msg
+    assert "category" in user_msg
+    assert "participants" in user_msg
+    assert "importance" in user_msg
+
+
+def test_extraction_prompt_max_3():
+    """最多 3 条的提示"""
+    msgs = [ChatMsg(role="user", content="hello", sender_name="test")]
+    result = build_extraction_prompt(msgs)
+    user_msg = result[1]["content"]
+    assert "最多 3 条" in user_msg
+
+
+def test_extraction_prompt_limits_15():
+    """只取最近 15 条"""
+    msgs = [ChatMsg(role="user", content=f"msg{i}", sender_name="test") for i in range(20)]
+    result = build_extraction_prompt(msgs)
+    user_msg = result[1]["content"]
+    # 只有最近 15 条
+    assert "msg19" in user_msg
+    assert "msg5" in user_msg
+    assert "msg4" not in user_msg

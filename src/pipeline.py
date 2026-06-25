@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 # 摘要更新间隔（消息数）
 _SUMMARY_INTERVAL = 15
+# 记忆提取间隔（消息数）
+_EXTRACT_INTERVAL = 10
 # 姓名缓存刷新间隔（秒）
 _NAME_SYNC_INTERVAL = 1800  # 30 min
 # 启动历史加载条数
@@ -90,6 +92,7 @@ class Pipeline:
         enriched = enrich(parsed, self.store, self.bot_names)
         if enriched is None:
             self._check_summary(parsed.room_id)
+            self._check_extract(parsed.room_id)
             self._check_name_sync()
             return None
 
@@ -127,6 +130,7 @@ class Pipeline:
         ))
 
         self._check_summary(parsed.room_id)
+        self._check_extract(parsed.room_id)
         self._check_name_sync()
 
         return decoded.clean_text
@@ -155,6 +159,48 @@ class Pipeline:
                         logger.info("Summary updated: room=%s", room_id[:20])
             except Exception:
                 logger.exception("Summary update failed: room=%s", room_id[:20])
+
+    def _check_extract(self, room_id: str):
+        """每 N 条消息触发一次记忆提取。"""
+        g = self.store.get_group(room_id)
+        if g.msg_count > 0 and g.msg_count % _EXTRACT_INTERVAL == 0:
+            try:
+                history = self.store.get_history(room_id, limit=15)
+                if len(history) < 5:
+                    return
+                items = self.llm.extract_memories(history)
+                if not items:
+                    return
+
+                added = 0
+                facts_added = 0
+                for item in items:
+                    content = item.get("content", "").strip()
+                    if not content:
+                        continue
+                    keywords = item.get("keywords", [])
+                    category = item.get("category", "fact")
+                    importance = min(5, max(1, item.get("importance", 3)))
+                    participants = item.get("participants", [])
+
+                    # 写入群记忆
+                    self.store.add_memory(room_id, content, keywords=keywords,
+                                          category=category, importance=importance)
+                    added += 1
+
+                    # 为 participants 中的人提取事实
+                    for name in participants:
+                        person, _ = self.store.resolve_name(name)
+                        if person:
+                            key = f"从记忆: {content[:30]}"
+                            if person.add_fact(key, content, source="llm_extract", confidence=0.6):
+                                facts_added += 1
+
+                if added:
+                    logger.info("Memory extraction: %d memories, %d facts (room=%s)",
+                                added, facts_added, room_id[:20])
+            except Exception:
+                logger.exception("Memory extraction failed: room=%s", room_id[:20])
 
     def _check_name_sync(self):
         """定时刷新 name_cache。"""

@@ -2,8 +2,22 @@
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-from src.store import Store
+from src.store import Store, Person
 from src.parse import ParsedMsg
+
+
+def _person_entry(person: Person, fallback_name: str) -> dict:
+    """为一个人生成上下文条目，包含关系与风格。"""
+    relations_str = ""
+    if person.relations:
+        parts = [f"{rid}:{label}" for rid, label in person.relations.items()]
+        relations_str = ", ".join(parts)[:80]
+    return {
+        "name": person.mention_name or fallback_name,
+        "facts": person.get_fact_strings(),
+        "relations": relations_str,
+        "style": person.speaking_style,
+    }
 
 
 @dataclass
@@ -36,19 +50,13 @@ def enrich(parsed: ParsedMsg, store: Store, bot_names: List[str] = None) -> Enri
             continue
         person, matched = store.resolve_name(name)
         if person and person.wxid != parsed.sender_wxid:
-            people[person.wxid] = {
-                "name": person.mention_name or matched or name,
-                "facts": person.get_fact_strings(),
-            }
+            people[person.wxid] = _person_entry(person, matched or name)
 
     # 扫描正文中的已知别名（使用 Store 公开方法）
     exclude = set(people.keys()) | {parsed.sender_wxid}
     alias_matches = store.scan_aliases_in_text(parsed.content, exclude_wxids=exclude, bot_names=bot_names)
     for wxid, (person, alias) in alias_matches.items():
-        people[wxid] = {
-            "name": person.mention_name or alias,
-            "facts": person.get_fact_strings(),
-        }
+        people[wxid] = _person_entry(person, alias)
 
     # 检索相关记忆
     keywords = list(parsed.raw_mentions) + list(people.keys())

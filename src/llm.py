@@ -148,6 +148,34 @@ class LLMClient:
             return ""
 
 
+    def extract_memories(self, recent_messages: list) -> list:
+        """从最近消息中提取结构化记忆。返回 [dict]，失败返回 []。"""
+        try:
+            from src.prompt import build_extraction_prompt
+            messages = build_extraction_prompt(recent_messages)
+
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=512,
+                temperature=0.3,
+            )
+            text = resp.choices[0].message.content.strip()
+            # 清理可能的 markdown 代码块标记
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+                if text.endswith("```"):
+                    text = text[:-3]
+                text = text.strip()
+            items = json.loads(text)
+            if not isinstance(items, list):
+                return []
+            return items[:3]  # 最多 3 条
+        except Exception:
+            logger.exception("记忆提取 LLM 调用失败")
+            return []
+
+
 def _sanitize(text: Optional[str]) -> str:
     """清理 LLM 回复：截断超长、处理空值。"""
     if not text:

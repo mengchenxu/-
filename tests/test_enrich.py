@@ -88,3 +88,35 @@ def test_enrich_mentionable_names():
     ctx = enrich(parsed, store, bot_names=["鼠鼠"])
     assert "子南" in ctx.mentionable_names
     assert "贯一" in ctx.mentionable_names
+
+
+def test_enrich_injects_relations():
+    """Enrich 阶段注入 Person.relations"""
+    store = Store()
+    p = store.get_or_create_person("wxid_a", "子南")
+    p.relations["wxid_b"] = "同事"
+    store.get_group("123@chatroom")
+
+    parsed = ParsedMsg(
+        room_id="123@chatroom", sender_wxid="wxid_c", sender_name="测试",
+        content="@子南 你在吗", raw_mentions=["子南"], is_at_bot=True,
+    )
+    ctx = enrich(parsed, store, bot_names=["鼠鼠"])
+    people_list = list(ctx.people.values())
+    assert any("wxid_b:同事" in p.get("relations", "") for p in people_list)
+
+
+def test_enrich_injects_speaking_style():
+    """Enrich 阶段注入 Person.speaking_style"""
+    store = Store()
+    p = store.get_or_create_person("wxid_a", "子南")
+    p.speaking_style = "语速快、喜欢用😂"
+    store.get_group("123@chatroom")
+
+    parsed = ParsedMsg(
+        room_id="123@chatroom", sender_wxid="wxid_c", sender_name="测试",
+        content="@子南 在不在", raw_mentions=["子南"], is_at_bot=True,
+    )
+    ctx = enrich(parsed, store, bot_names=["鼠鼠"])
+    people_list = list(ctx.people.values())
+    assert any("😂" in p.get("style", "") for p in people_list)

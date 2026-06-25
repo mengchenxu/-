@@ -447,3 +447,186 @@ def test_migrate_backup_files(tmp_path):
     assert not os.path.exists(users_path)
     assert os.path.exists(users_path + ".bak")
     assert store.get_person("wxid_abc") is not None
+
+
+# ============================================================
+# 记忆提取全链路测试（mock LLM）
+# ============================================================
+class FakeLLM:
+    """Mock LLMClient，只实现 extract_memories。"""
+
+    def __init__(self, items=None):
+        self.items = items or []
+        self._called = False
+
+    def extract_memories(self, recent_messages):
+        self._called = True
+        return self.items
+
+    def chat(self, messages, tools_enabled=True):
+        return "mock reply"
+
+    def summarize_context(self, history, existing=""):
+        return "mock summary"
+
+
+def test_pipeline_extract_memories_adds_to_store():
+    """Pipeline._check_extract 将 LLM 返回的记忆写入 Store"""
+    from src.pipeline import Pipeline, _EXTRACT_INTERVAL
+    from unittest.mock import MagicMock
+
+    store = Store()
+    g = store.get_group("123@chatroom")
+    g.msg_count = _EXTRACT_INTERVAL  # = 10
+
+    for i in range(10):
+        store.add_to_history("123@chatroom", ChatMsg(
+            role="user", content=f"msg{i}", sender_name=f"user{i}",
+            timestamp=1000000 + i,
+        ))
+
+    fake_llm = FakeLLM(items=[
+        {
+            "content": "user1 下周去日本参加婚礼",
+            "category": "event",
+            "keywords": ["日本", "婚礼"],
+            "participants": ["user1"],
+            "importance": 4,
+        },
+        {
+            "content": "群里决定周五聚餐",
+            "category": "decision",
+            "keywords": ["聚餐", "周五"],
+            "participants": ["user1", "user2"],
+            "importance": 5,
+        },
+    ])
+
+    pipeline = Pipeline.__new__(Pipeline)
+    pipeline.store = store
+    pipeline.llm = fake_llm
+    pipeline.weflow = MagicMock()
+    pipeline.config = MagicMock()
+    pipeline.config.bot.name = "鼠鼠"
+    pipeline.config.llm.model = "test"
+    pipeline.bot_names = ["鼠鼠"]
+    pipeline.cooldown = 3
+    pipeline._running = True
+    pipeline._last_sync = 9999999999
+
+    pipeline._check_extract("123@chatroom")
+    assert fake_llm._called
+
+    g2 = store.get_group("123@chatroom")
+    assert len(g2.memories) == 2
+    assert g2.memories[0].text == "user1 下周去日本参加婚礼"
+    assert "日本" in g2.memories[0].keywords
+    assert g2.memories[1].importance == 5
+
+    # 事实已提取到 participants
+    p = store.get_or_create_person("__placeholder__user1", "user1")
+    assert len(p.facts) >= 1
+
+
+def test_pipeline_extract_memories_empty_llm_response():
+    """LLM 返回空数组时不崩溃"""
+    from src.pipeline import Pipeline, _EXTRACT_INTERVAL
+    from unittest.mock import MagicMock
+
+    store = Store()
+    g = store.get_group("123@chatroom")
+    g.msg_count = _EXTRACT_INTERVAL
+
+    for i in range(10):
+        store.add_to_history("123@chatroom", ChatMsg(
+            role="user", content=f"msg{i}", sender_name=f"user{i}",
+        ))
+
+    fake_llm = FakeLLM(items=[])
+    pipeline = Pipeline.__new__(Pipeline)
+    pipeline.store = store
+    pipeline.llm = fake_llm
+    pipeline.weflow = MagicMock()
+    pipeline.config = MagicMock()
+    pipeline.config.bot.name = "鼠鼠"
+    pipeline.config.llm.model = "test"
+    pipeline.bot_names = ["鼠鼠"]
+    pipeline.cooldown = 3
+    pipeline._running = True
+    pipeline._last_sync = 9999999999
+
+    pipeline._check_extract("123@chatroom")
+    # 不崩溃，没有新记忆
+    assert len(store.get_group("123@chatroom").memories) == 0
+
+
+def test_pipeline_extract_memories_llm_error():
+    """LLM 抛异常时 _check_extract 不崩溃"""
+    from src.pipeline import Pipeline, _EXTRACT_INTERVAL
+    from unittest.mock import MagicMock
+
+    store = Store()
+    g = store.get_group("123@chatroom")
+    g.msg_count = _EXTRACT_INTERVAL
+
+    for i in range(10):
+        store.add_to_history("123@chatroom", ChatMsg(
+            role="user", content=f"msg{i}", sender_name=f"user{i}",
+        ))
+
+    class ErrorLLM:
+        def extract_memories(self, recent_messages):
+            raise RuntimeError("API boom")
+        def chat(self, messages, tools_enabled=True):
+            return ""
+        def summarize_context(self, history, existing=""):
+            return ""
+
+    pipeline = Pipeline.__new__(Pipeline)
+    pipeline.store = store
+    pipeline.llm = ErrorLLM()
+    pipeline.weflow = MagicMock()
+    pipeline.config = MagicMock()
+    pipeline.config.bot.name = "鼠鼠"
+    pipeline.config.llm.model = "test"
+    pipeline.bot_names = ["鼠鼠"]
+    pipeline.cooldown = 3
+    pipeline._running = True
+    pipeline._last_sync = 9999999999
+
+    # 不应该抛异常
+    pipeline._check_extract("123@chatroom")
+    assert len(store.get_group("123@chatroom").memories) == 0
+
+
+def test_pipeline_extract_triggers_only_every_n():
+    """只在 msg_count 是 _EXTRACT_INTERVAL 的倍数时触发"""
+    from src.pipeline import Pipeline, _EXTRACT_INTERVAL
+    from unittest.mock import MagicMock
+
+    store = Store()
+    g = store.get_group("123@chatroom")
+    g.msg_count = _EXTRACT_INTERVAL + 1  # 不是倍数
+
+    for i in range(10):
+        store.add_to_history("123@chatroom", ChatMsg(
+            role="user", content=f"msg{i}", sender_name=f"user{i}",
+        ))
+
+    fake_llm = FakeLLM(items=[{"content": "test", "category": "fact", "keywords": [], "participants": [], "importance": 3}])
+    pipeline = Pipeline.__new__(Pipeline)
+    pipeline.store = store
+    pipeline.llm = fake_llm
+    pipeline.weflow = MagicMock()
+    pipeline.config = MagicMock()
+    pipeline.config.bot.name = "鼠鼠"
+    pipeline.config.llm.model = "test"
+    pipeline.bot_names = ["鼠鼠"]
+    pipeline.cooldown = 3
+    pipeline._running = True
+    pipeline._last_sync = 9999999999
+
+    pipeline._check_extract("123@chatroom")
+    # 没有触发
+    assert not fake_llm._called
+    assert len(store.get_group("123@chatroom").memories) == 0

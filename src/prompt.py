@@ -3,6 +3,38 @@ from typing import Dict, List
 
 from src.enrich import EnrichedCtx
 
+_EXTRACTION_SYSTEM = """你是一个群聊记录分析助手。阅读群聊消息，提取值得记住的内容。
+
+判断标准：
+- 群成员的明确表态、偏好、计划（如"我下周去日本"）
+- 群的共识或决定（如"大家都觉得去公园比较好"）
+- 有趣的群内梗/笑点
+- 重要的话题转折
+
+只提取确定的事实，不要推测。没有值得记的就返回空数组。"""
+
+
+def build_extraction_prompt(recent_messages: List) -> List[Dict[str, str]]:
+    """构建记忆提取 prompt。recent_messages 是 ChatMsg 列表。"""
+    lines = []
+    for m in recent_messages[-15:]:
+        name = getattr(m, 'sender_name', '') or '未知'
+        role = "用户" if m.role == "user" else "助手"
+        lines.append(f"[{role}({name})]: {m.content[:150]}")
+
+    user = f"""最新消息:
+{chr(10).join(lines)}
+
+对每条值得记住的内容，返回一行 JSON（不要其他文字，不要 markdown 代码块）：
+{{"content": "...", "category": "event|decision|fact|joke|topic_change", "keywords": ["k1","k2"], "participants": ["名字1"], "importance": 1-5}}
+
+最多 3 条。没有则返回 []"""
+
+    return [
+        {"role": "system", "content": _EXTRACTION_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
 
 def build_prompt(enriched: EnrichedCtx, system_prompt: str) -> List[Dict[str, str]]:
     """构建 LLM 消息列表。返回 [{"role": "system", "content": ...},
