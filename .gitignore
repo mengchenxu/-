@@ -34,3 +34,4 @@ data/
 *.dll
 WeChatFerry/
 weflow*
+.vs/

@@ -1,4 +1,7 @@
 """Store 数据层测试 — 24 个测试覆盖 Person, Group, Memory, ChatMsg, Store CRUD, JSON save/load, 名字解析, 历史管理"""
+import json
+import os
+
 import pytest
 from src.store import Store, Person, Group, ChatMsg, GroupMemory, FactEntry
 
@@ -289,3 +292,158 @@ def test_scan_aliases_excludes_bot():
     store.get_or_create_person("wxid_bot", "shu_shu")
     matches = store.scan_aliases_in_text("@shu_shu hi", bot_names=["shu_shu"])
     assert "wxid_bot" not in matches
+
+
+# ============================================================
+# Person 新字段测试
+# ============================================================
+def test_person_relations_field():
+    p = Person(wxid="wxid_a", mention_name="子南")
+    p.relations["wxid_b"] = "同事"
+    p.relations["wxid_c"] = "朋友"
+    assert p.relations["wxid_b"] == "同事"
+    assert len(p.relations) == 2
+
+
+def test_person_speaking_style_field():
+    p = Person(wxid="wxid_a", mention_name="子南")
+    p.speaking_style = "语速快、喜欢用😂、爱说'懂了懂了'"
+    assert "😂" in p.speaking_style
+
+
+# ============================================================
+# GroupMemory 新字段测试
+# ============================================================
+def test_group_memory_participants():
+    m = GroupMemory(id="m1", text="子南和贯一约了周五打球", participants=["子南", "贯一"])
+    assert "子南" in m.participants
+    assert "贯一" in m.participants
+
+
+# ============================================================
+# 新字段 save/load roundtrip
+# ============================================================
+def test_new_fields_roundtrip(tmp_path):
+    store = Store()
+    p = store.get_or_create_person("wxid_a", "子南")
+    p.relations["wxid_b"] = "同事"
+    p.speaking_style = "语速快、喜欢用😂"
+    p.catchphrases.append("懂了懂了")
+
+    g = store.get_group("123@chatroom", "测试群")
+    g.add_memory("子南和贯一约了周五打球",
+                 keywords=["子南", "贯一"],
+                 category="event",
+                 importance=4)
+
+    path = str(tmp_path / "store.json")
+    store.save(path)
+
+    store2 = Store.load(path)
+    p2 = store2.get_person("wxid_a")
+    assert p2.relations == {"wxid_b": "同事"}
+    assert p2.speaking_style == "语速快、喜欢用😂"
+    assert "懂了懂了" in p2.catchphrases
+
+    g2 = store2.get_group("123@chatroom")
+    assert len(g2.memories) == 1
+    assert g2.memories[0].text == "子南和贯一约了周五打球"
+
+
+# ============================================================
+# 迁移测试
+# ============================================================
+def test_migrate_users_json(tmp_path):
+    """从旧 users.json 迁移到 store.json"""
+    import json
+    d = str(tmp_path / "data")
+    os.makedirs(d, exist_ok=True)
+
+    users = {
+        "wxid_abc": {
+            "mention_name": "子南",
+            "preferred_name": "子南",
+            "aliases": ["南哥"],
+            "display_names": ["子南", "阿南"],
+            "known_facts": {
+                "xp系统": {"value": "喜欢人马片", "source": "llm_extract", "confidence": 0.6},
+                "工作": {"value": "程序员", "source": "user_stated", "confidence": 0.9},
+            },
+            "relations": {"wxid_def": "同事"},
+            "speaking_style": "语速快、喜欢用😂",
+            "catchphrases": ["懂了懂了"],
+        }
+    }
+    with open(os.path.join(d, "users.json"), "w", encoding="utf-8") as f:
+        json.dump(users, f, ensure_ascii=False)
+
+    store_path = os.path.join(d, "store.json")
+    store = Store.migrate_from_old_files(store_path, data_dir=d)
+    assert store.get_person("wxid_abc") is not None
+    p = store.get_person("wxid_abc")
+    assert p.mention_name == "子南"
+    assert "南哥" in p.aliases
+    assert len(p.facts) == 2
+    assert p.facts[0].value == "喜欢人马片"
+    assert p.relations == {"wxid_def": "同事"}
+    assert "😂" in p.speaking_style
+    assert "懂了懂了" in p.catchphrases
+
+
+def test_migrate_group_memories_json(tmp_path):
+    """从旧 group_memories.json 迁移到 store.json"""
+    import json
+    d = str(tmp_path / "data")
+    os.makedirs(d, exist_ok=True)
+
+    memories = {
+        "123@chatroom": [
+            {"content": "子南喜欢人马片", "keywords": ["子南", "人马"], "category": "joke", "importance": 4},
+            {"content": "贯一下周去日本", "keywords": ["贯一", "日本"], "category": "event", "importance": 5},
+        ]
+    }
+    with open(os.path.join(d, "group_memories.json"), "w", encoding="utf-8") as f:
+        json.dump(memories, f, ensure_ascii=False)
+
+    store_path = os.path.join(d, "store.json")
+    store = Store.migrate_from_old_files(store_path, data_dir=d)
+    g = store.get_group("123@chatroom")
+    assert len(g.memories) == 2
+    assert g.memories[0].text == "子南喜欢人马片"
+    assert "子南" in g.memories[0].keywords
+
+
+def test_migrate_idempotent(tmp_path):
+    """迁移幂等——已有 .bak 文件时跳过"""
+    import json
+    d = str(tmp_path / "data")
+    os.makedirs(d, exist_ok=True)
+
+    users_path = os.path.join(d, "users.json")
+    with open(users_path, "w", encoding="utf-8") as f:
+        json.dump({"wxid_abc": {"preferred_name": "子南"}}, f)
+    with open(users_path + ".bak", "w", encoding="utf-8") as f:
+        f.write("already migrated")
+
+    store_path = os.path.join(d, "store.json")
+    Store.migrate_from_old_files(store_path, data_dir=d)
+    # users.json 仍存在（.bak 导致跳过）
+    assert os.path.exists(users_path)
+
+
+def test_migrate_backup_files(tmp_path):
+    """迁移成功后旧文件被重命名为 .bak"""
+    import json
+    d = str(tmp_path / "data")
+    os.makedirs(d, exist_ok=True)
+
+    users_path = os.path.join(d, "users.json")
+    with open(users_path, "w", encoding="utf-8") as f:
+        json.dump({"wxid_abc": {"preferred_name": "子南"}}, f)
+
+    store_path = os.path.join(d, "store.json")
+    store = Store.migrate_from_old_files(store_path, data_dir=d)
+    # 迁移后原文件改名
+    assert not os.path.exists(users_path)
+    assert os.path.exists(users_path + ".bak")
+    assert store.get_person("wxid_abc") is not None

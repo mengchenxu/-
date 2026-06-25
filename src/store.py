@@ -37,6 +37,8 @@ class Person:
     aliases: List[str] = field(default_factory=list)
     facts: List[FactEntry] = field(default_factory=list)
     catchphrases: List[str] = field(default_factory=list)
+    relations: Dict[str, str] = field(default_factory=dict)       # wxid → 关系标签（"同事"/"朋友"等）
+    speaking_style: str = ""                                       # LLM 生成的个人风格描述
     first_seen: float = 0.0
     last_seen: float = 0.0
 
@@ -101,6 +103,7 @@ class GroupMemory:
     text: str
     keywords: List[str] = field(default_factory=list)
     category: str = "fact"
+    participants: List[str] = field(default_factory=list)          # 涉及的群友名字
     importance: int = 3
     timestamp: float = 0.0
 
@@ -332,7 +335,8 @@ class Store:
 
         def memory_to_dict(m: GroupMemory) -> Dict[str, Any]:
             return {"id": m.id, "text": m.text, "keywords": m.keywords,
-                    "category": m.category, "importance": m.importance, "timestamp": m.timestamp}
+                    "category": m.category, "participants": m.participants,
+                    "importance": m.importance, "timestamp": m.timestamp}
 
         people = {}
         for wxid, p in self._people.items():
@@ -340,6 +344,8 @@ class Store:
                 "mention_name": p.mention_name, "aliases": p.aliases,
                 "facts": [fact_to_dict(f) for f in p.facts],
                 "catchphrases": p.catchphrases,
+                "relations": p.relations,
+                "speaking_style": p.speaking_style,
                 "first_seen": p.first_seen, "last_seen": p.last_seen,
             }
 
@@ -396,6 +402,8 @@ class Store:
                 wxid=wxid, mention_name=d.get("mention_name", ""),
                 aliases=d.get("aliases", []),
                 catchphrases=d.get("catchphrases", []),
+                relations=d.get("relations", {}),
+                speaking_style=d.get("speaking_style", ""),
                 first_seen=d.get("first_seen", 0.0),
                 last_seen=d.get("last_seen", 0.0),
             )
@@ -421,6 +429,7 @@ class Store:
                     id=md.get("id", ""), text=md.get("text", ""),
                     keywords=md.get("keywords", []),
                     category=md.get("category", "fact"),
+                    participants=md.get("participants", []),
                     importance=md.get("importance", 3),
                     timestamp=md.get("timestamp", 0.0),
                 ))
@@ -432,5 +441,82 @@ class Store:
                     timestamp=hd.get("timestamp", 0.0),
                 ))
             store._groups[rid] = g
+
+        return store
+
+    # ================================================================
+    # 旧数据迁移
+    # ================================================================
+    @classmethod
+    def migrate_from_old_files(cls, store_path: str = "data/store.json",
+                                data_dir: str = "data") -> "Store":
+        """从旧的 users.json / group_memories.json 迁移数据到 Store。幂等。"""
+        import os as _os
+
+        store = cls.load(store_path)
+        migrated = False
+
+        # 1. 迁移 users.json → Person
+        users_path = _os.path.join(data_dir, "users.json")
+        if _os.path.exists(users_path) and not _os.path.exists(users_path + ".bak"):
+            try:
+                with open(users_path, "r", encoding="utf-8") as f:
+                    users_data = json.load(f)
+                for wxid, d in users_data.items():
+                    p = store.get_or_create_person(wxid, d.get("mention_name", "") or d.get("preferred_name", ""))
+                    # 迁移 aliases
+                    for alias in d.get("aliases", []):
+                        p.add_alias(alias)
+                    for dn in d.get("display_names", []):
+                        if dn and dn != p.mention_name:
+                            p.add_alias(dn)
+                    # 迁移 facts
+                    for key, fd in d.get("known_facts", {}).items():
+                        if isinstance(fd, dict):
+                            p.add_fact(key, fd.get("value", ""),
+                                       source=fd.get("source", "legacy"),
+                                       confidence=fd.get("confidence", 0.5))
+                        else:
+                            p.add_fact(key, str(fd), source="legacy", confidence=0.5)
+                    # 迁移 relations
+                    for rel_wxid, rel_label in d.get("relations", {}).items():
+                        p.relations[rel_wxid] = rel_label
+                    # 迁移 speaking_style
+                    if d.get("speaking_style"):
+                        p.speaking_style = d["speaking_style"]
+                    # 迁移 catchphrases
+                    for cp in d.get("catchphrases", []):
+                        if cp not in p.catchphrases:
+                            p.catchphrases.append(cp)
+                _os.rename(users_path, users_path + ".bak")
+                logger.info("Migrated %d users from %s", len(users_data), users_path)
+                migrated = True
+            except Exception:
+                logger.exception("Failed to migrate %s, skipping", users_path)
+
+        # 2. 迁移 group_memories.json → Group
+        mem_path = _os.path.join(data_dir, "group_memories.json")
+        if _os.path.exists(mem_path) and not _os.path.exists(mem_path + ".bak"):
+            try:
+                with open(mem_path, "r", encoding="utf-8") as f:
+                    mem_data = json.load(f)
+                for room_id, mems in mem_data.items():
+                    g = store.get_group(room_id)
+                    for m in mems:
+                        g.add_memory(
+                            text=m.get("content", m.get("text", "")),
+                            keywords=m.get("keywords", []),
+                            category=m.get("category", "fact"),
+                            importance=m.get("importance", 3),
+                        )
+                _os.rename(mem_path, mem_path + ".bak")
+                logger.info("Migrated %d groups memories from %s", len(mem_data), mem_path)
+                migrated = True
+            except Exception:
+                logger.exception("Failed to migrate %s, skipping", mem_path)
+
+        if migrated:
+            store.save(store_path)
+            logger.info("Migration complete, saved to %s", store_path)
 
         return store
