@@ -36,5 +36,30 @@ groups:
 session:
   max_history_rounds: 10        # 每个群最多保留多少轮对话
 
+# --- 主动发言 ---
+proactive:
+  enabled: true                        # 是否启用主动发言
+  cold_silence_minutes: 30             # 冷场阈值（分钟）
+  schedule_times: ["08:30", "12:30", "18:00", "22:00"]
+  hot_topic_interval_hours: 4          # 热点检查间隔（小时）
+  max_per_day: 10                      # 每日上限
+  min_interval_minutes: 30             # 最小间隔（分钟）
+  quiet_hours: ["02:00", "06:00"]      # 静音时段
+
+# --- 游戏意图检测 ---
+game:
+  enabled: true                        # 是否启用游戏意图检测
+  keywords: ["游戏", "无聊", "玩", "来点"]
+  commands:
+    - name: "/骰子"
+      description: "掷骰子 — 随机 1-6"
+    - name: "/猜拳"
+      description: "石头剪刀布"
+    - name: "/硬币"
+      description: "抛硬币 — 正面还是反面"
+  intent_model: "deepseek-chat"
+  intent_temperature: 0.1
+  intent_max_tokens: 2
+
 # --- WeFlow 配置 ---
 weflow_token: ""               # WeFlow API 服务 token（可选，留空不使用）
