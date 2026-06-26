@@ -135,6 +135,10 @@ class Pipeline:
             self._check_name_sync()
             return None
 
+        # 游戏命令直接处理（不走 LLM）
+        if parsed.is_command and parsed.command == "/骰子":
+            return self._handle_dice(parsed)
+
         # Phase 3-6: 完整管道（仅 @bot）
         # 冷却检查（基于 bot 上次回复时间，非最后消息时间）
         group = self.store.get_group(parsed.room_id)
@@ -173,6 +177,22 @@ class Pipeline:
         self._check_name_sync()
 
         return decoded.clean_text
+
+    def _handle_dice(self, parsed: ParsedMsg) -> str:
+        """处理 /骰子 命令：随机 1-6。"""
+        import random
+        result = random.randint(1, 6)
+        reply = f"🎲 人家摇出了 [{result}] 喵~"
+        # 记录回复到历史
+        self.store.add_to_history(parsed.room_id, ChatMsg(
+            role="assistant", content=reply,
+            sender_name=self.config.bot.name,
+            timestamp=time.time(),
+        ))
+        # 发送
+        sender_display = self.weflow.get_display_name(parsed.sender_wxid) or parsed.sender_name
+        send(DecodedReply(clean_text=reply), parsed.room_id, sender_display)
+        return reply
 
     # ================================================================
     # 内部方法

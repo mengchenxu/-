@@ -1,8 +1,9 @@
-"""游戏意图检测 测试 — 覆盖关键词 → LLM 意图分类 → 路由全链路"""
+"""游戏意图检测 + 游戏命令 测试"""
 import pytest
 from unittest.mock import Mock, patch
 
 from src.config import AppConfig, GameConfig
+from src.store import Store
 from src.parse import ParsedMsg
 from src.game_intent import GameIntentDetector
 
@@ -270,3 +271,41 @@ class TestPipelineIntegration:
 
         assert result is None
         assert call_count == 0  # LLM 未被调用
+
+
+def test_dice_returns_1_to_6():
+    """Pipeline._handle_dice 返回 1-6 的结果。"""
+    from src.pipeline import Pipeline
+    from unittest.mock import MagicMock
+
+    store = Store()
+    store.get_group("123@chatroom")
+
+    pipeline = Pipeline.__new__(Pipeline)
+    pipeline.store = store
+    pipeline.weflow = MagicMock()
+    pipeline.config = MagicMock()
+    pipeline.config.bot.name = "鼠鼠"
+
+    from src.parse import ParsedMsg
+    parsed = ParsedMsg(
+        room_id="123@chatroom", sender_wxid="wxid_x", sender_name="主人",
+        content="/骰子", raw_mentions=[], is_at_bot=True,
+        is_command=True, command="/骰子",
+    )
+
+    # 跑 20 次确保随机分布
+    results = set()
+    for _ in range(20):
+        reply = pipeline._handle_dice(parsed)
+        # 格式正确
+        assert "🎲" in reply
+        assert "喵~" in reply
+        # 提取数字
+        import re
+        match = re.search(r'\[(\d)\]', reply)
+        assert match
+        results.add(int(match.group(1)))
+
+    # 应该覆盖所有 6 面
+    assert results == {1, 2, 3, 4, 5, 6}
