@@ -9,8 +9,10 @@ from src.parse import parse, ParsedMsg
 from src.enrich import enrich
 from src.prompt import build_prompt
 from src.llm import LLMClient
-from src.decode import decode
+from src.decode import decode, DecodedReply
 from src.send import send
+from src.proactive import ProactiveSpeaker
+from src.game_intent import GameIntentDetector
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,18 @@ class Pipeline:
         self._last_sync = 0.0
         self._running = False
 
+        # 主动发言后台线程
+        self.proactive = ProactiveSpeaker(
+            store=self.store,
+            llm=self.llm,
+            config=config,
+            send_fn=send,
+            weflow_client=weflow_client,
+        )
+
+        # 游戏意图检测
+        self.game_detector = GameIntentDetector(config)
+
     # ================================================================
     # 生命周期
     # ================================================================
@@ -60,12 +74,14 @@ class Pipeline:
             logger.exception("History loading failed, continuing...")
 
         self._running = True
+        self.proactive.start()
         logger.info("Pipeline started. Store: %d people, %d groups",
                     len(self.store._people), len(self.store._groups))
 
     def stop(self):
         """停止管道，保存数据。"""
         self._running = False
+        self.proactive.stop()
         try:
             self.store.save()
             logger.info("Store saved.")
@@ -92,6 +108,28 @@ class Pipeline:
         # Phase 2: Enrich（非@ 在此返回）
         enriched = enrich(parsed, self.store, self.bot_names)
         if enriched is None:
+            # 游戏意图检测（非@消息）
+            game_result = self.game_detector.detect(parsed)
+            if game_result == "想玩":
+                game_list = self.game_detector.get_game_list()
+                # 记录回复到历史
+                self.store.add_to_history(parsed.room_id, ChatMsg(
+                    role="assistant", content=game_list,
+                    sender_name=self.config.bot.name,
+                    timestamp=time.time(),
+                ))
+                # 发送游戏列表
+                try:
+                    sender_display = self.weflow.get_display_name(parsed.sender_wxid) or parsed.sender_name
+                    send(DecodedReply(clean_text=game_list), parsed.room_id, sender_display)
+                except Exception:
+                    logger.exception("Game list send failed")
+
+                self._check_summary(parsed.room_id)
+                self._check_extract(parsed.room_id)
+                self._check_name_sync()
+                return game_list
+
             self._check_summary(parsed.room_id)
             self._check_extract(parsed.room_id)
             self._check_name_sync()
