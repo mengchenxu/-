@@ -80,10 +80,6 @@ game:
   commands:                                      # 游戏命令列表（回复游戏列表时展示）
     - name: "/骰子"
       description: "掷骰子 — 随机 1-6"
-    - name: "/猜拳"
-      description: "石头剪刀布"
-    - name: "/硬币"
-      description: "抛硬币 — 正面还是反面"
   intent_model: "deepseek-chat"                  # 意图分类用的 LLM 模型
   intent_temperature: 0.1                        # 意图分类 temperature（极低，追求稳定）
   intent_max_tokens: 2                           # 意图分类 max_tokens（只需"想玩"/"不想玩"）

@@ -109,28 +109,6 @@ class Pipeline:
         # Phase 2: Enrich（非@ 在此返回）
         enriched = enrich(parsed, self.store, self.bot_names)
         if enriched is None:
-            # 游戏意图检测（非@消息）
-            game_result = self.game_detector.detect(parsed)
-            if game_result == "想玩":
-                game_list = self.game_detector.get_game_list()
-                # 记录回复到历史
-                self.store.add_to_history(parsed.room_id, ChatMsg(
-                    role="assistant", content=game_list,
-                    sender_name=self.config.bot.name,
-                    timestamp=time.time(),
-                ))
-                # 发送游戏列表
-                try:
-                    sender_display = self.weflow.get_display_name(parsed.sender_wxid) or parsed.sender_name
-                    send(DecodedReply(clean_text=game_list), parsed.room_id, sender_display)
-                except Exception:
-                    logger.exception("Game list send failed")
-
-                self._check_summary(parsed.room_id)
-                self._check_extract(parsed.room_id)
-                self._check_name_sync()
-                return game_list
-
             self._check_summary(parsed.room_id)
             self._check_extract(parsed.room_id)
             self._check_name_sync()
@@ -139,6 +117,22 @@ class Pipeline:
         # 游戏命令直接处理（不走 LLM）
         if parsed.is_command and parsed.command == "/骰子":
             return self._handle_dice(parsed)
+
+        # @bot 游戏意图检测（仅在 mention bot 时触发）
+        game_result = self.game_detector.detect(parsed)
+        if game_result == "想玩":
+            game_list = self.game_detector.get_game_list()
+            self.store.add_to_history(parsed.room_id, ChatMsg(
+                role="assistant", content=game_list,
+                sender_name=self.config.bot.name,
+                timestamp=time.time(),
+            ))
+            try:
+                sender_display = self.weflow.get_display_name(parsed.sender_wxid) or parsed.sender_name
+                send(DecodedReply(clean_text=game_list), parsed.room_id, sender_display)
+            except Exception:
+                logger.exception("Game list send failed")
+            return game_list
 
         # Phase 3-6: 完整管道（仅 @bot）
         # 冷却检查（基于 bot 上次回复时间，非最后消息时间）

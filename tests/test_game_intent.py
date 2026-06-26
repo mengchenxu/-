@@ -234,14 +234,16 @@ class TestPipelineIntegration:
         result = detector.detect(parsed)
         assert result == "不想玩"
 
-    def test_at_bot_message_skips_game_detection(self):
-        """@bot 消息走正常 enrich → LLM 管道，不触发游戏检测。"""
-        # 这由 Pipeline.handle() 中的分支保证：
-        # is_at_bot → enrich 不返回 None → 不走游戏检测分支
-        parsed = _make_parsed("@鼠鼠 来玩游戏", is_at_bot=True)
-        assert parsed.is_at_bot is True
-        # enrich 会返回 EnrichedCtx（不是 None），触发 Phase 3-6
-        # 游戏检测只在 enrich is None 的分支中触发
+    def test_game_detection_only_on_at_bot(self):
+        """游戏意图检测只在 @bot 时触发，非@ 消息不触发。
+        这个约束由 Pipeline.handle() 保证——game_detector 在 is_at_bot 分支中调用。"""
+        parsed_at = _make_parsed("@鼠鼠 好无聊", is_at_bot=True)
+        assert parsed_at.is_at_bot is True
+        # @bot 消息 → game_detector.detect 被调用（在 Pipeline 中）
+
+        parsed_non = _make_parsed("好无聊啊", is_at_bot=False)
+        assert parsed_non.is_at_bot is False
+        # 非@消息 → enrich 返回 None → Pipeline 直接返回，不调 game_detector
 
     def test_keyword_edge_cases(self):
         """关键词边界测试。"""

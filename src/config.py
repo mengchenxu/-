@@ -123,8 +123,6 @@ def load_config(path: str = "config/config.yaml") -> AppConfig:
         keywords=game_raw.get("keywords", ["游戏", "无聊", "玩", "来点"]),
         commands=game_raw.get("commands", [
             {"name": "/骰子", "description": "掷骰子 — 随机 1-6"},
-            {"name": "/猜拳", "description": "石头剪刀布"},
-            {"name": "/硬币", "description": "抛硬币 — 正面还是反面"},
         ]),
         intent_model=game_raw.get("intent_model", "deepseek-chat"),
         intent_temperature=float(game_raw.get("intent_temperature", 0.1)),
