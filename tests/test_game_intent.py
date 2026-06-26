@@ -284,11 +284,14 @@ def test_dice_returns_1_to_6():
     store = Store()
     store.get_group("123@chatroom")
 
+    from src.game_session import GameSessionManager
+
     pipeline = Pipeline.__new__(Pipeline)
     pipeline.store = store
     pipeline.weflow = MagicMock()
     pipeline.config = MagicMock()
     pipeline.config.bot.name = "鼠鼠"
+    pipeline.game_manager = GameSessionManager()
 
     from src.parse import ParsedMsg
     parsed = ParsedMsg(
@@ -300,7 +303,7 @@ def test_dice_returns_1_to_6():
     # Mock send 避免操作真实微信窗口
     with patch("src.pipeline.send", return_value=True):
         results = set()
-        for _ in range(20):
+        for _ in range(100):
             reply = pipeline._handle_dice(parsed)
             assert "🎲" in reply
             assert "喵~" in reply

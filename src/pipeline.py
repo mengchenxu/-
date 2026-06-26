@@ -13,6 +13,7 @@ from src.decode import decode, DecodedReply
 from src.send import send
 from src.proactive import ProactiveSpeaker
 from src.game_intent import GameIntentDetector
+from src.game_session import GameSessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,9 @@ class Pipeline:
 
         # 游戏意图检测
         self.game_detector = GameIntentDetector(config)
+
+        # 游戏会话管理（一个群一个活跃游戏）
+        self.game_manager = GameSessionManager(timeout_minutes=5)
 
     # ================================================================
     # 生命周期
@@ -106,6 +110,18 @@ class Pipeline:
         self._add_to_history(parsed)
         self.store.track_style(parsed.room_id, parsed.content)
 
+        # 游戏超时检查（每次 handle() 入口处执行）
+        self._check_game_timeout(parsed.room_id)
+
+        # 游戏模式路由（Parse 之后、Enrich 之前）
+        # 游戏模式中，非 @ 消息被游戏处理器拦截，不调 LLM
+        if not parsed.is_at_bot and self.game_manager.is_in_game(parsed.room_id):
+            result = self._handle_game_message(parsed)
+            self._check_summary(parsed.room_id)
+            self._check_extract(parsed.room_id)
+            self._check_name_sync()
+            return result
+
         # Phase 2: Enrich（非@ 在此返回）
         enriched = enrich(parsed, self.store, self.bot_names)
         if enriched is None:
@@ -114,8 +130,9 @@ class Pipeline:
             self._check_name_sync()
             return None
 
-        # 游戏命令直接处理（不走 LLM）
+        # 游戏命令直接处理（不走 LLM）+ 进入游戏模式
         if parsed.is_command and parsed.command == "/骰子":
+            self.game_manager.enter(parsed.room_id, "/骰子", "骰子")
             return self._handle_dice(parsed)
 
         # @bot 游戏意图检测（仅在 mention bot 时触发）
@@ -174,10 +191,16 @@ class Pipeline:
         return decoded.clean_text
 
     def _handle_dice(self, parsed: ParsedMsg) -> str:
-        """处理 /骰子 命令：随机 1-6。"""
+        """处理 /骰子 命令：随机 1-6。如果已在游戏模式中则刷新会话。"""
         import random
         result = random.randint(1, 6)
         reply = f"🎲 人家摇出了 [{result}] 喵~"
+
+        # 刷新游戏会话（如已进入游戏模式）
+        session = self.game_manager.get(parsed.room_id)
+        if session:
+            session.touch()
+
         # 记录回复到历史
         self.store.add_to_history(parsed.room_id, ChatMsg(
             role="assistant", content=reply,
@@ -188,6 +211,49 @@ class Pipeline:
         sender_display = self.weflow.get_display_name(parsed.sender_wxid) or parsed.sender_name
         send(DecodedReply(clean_text=reply), parsed.room_id, sender_display)
         return reply
+
+    def _check_game_timeout(self, room_id: str):
+        """检查游戏会话超时，超时则退出并发送猫娘公告。"""
+        expired = self.game_manager.check_timeout(room_id)
+        if expired:
+            msg = self.game_manager.make_exit_message(expired.display_name)
+            send(DecodedReply(clean_text=msg), room_id, "")
+            self.store.add_to_history(room_id, ChatMsg(
+                role="assistant", content=msg,
+                sender_name=self.config.bot.name,
+                timestamp=time.time(),
+            ))
+            logger.info("Game timeout: room=%s game=%s", room_id[:20], expired.game_name)
+
+    def _handle_game_message(self, parsed: ParsedMsg) -> Optional[str]:
+        """处理游戏模式中的非 @ 消息。返回 bot 回复文本或 None。"""
+        session = self.game_manager.get(parsed.room_id)
+        if session is None:
+            return None
+
+        # 手动退出检查
+        if self.game_manager.is_exit_command(parsed.content):
+            display_name = session.display_name
+            self.game_manager.leave(parsed.room_id)
+            msg = self.game_manager.make_exit_message(display_name)
+            # 公告发送（不调 LLM）
+            sender_display = self.weflow.get_display_name(parsed.sender_wxid) or parsed.sender_name
+            send(DecodedReply(clean_text=msg), parsed.room_id, sender_display)
+            self.store.add_to_history(parsed.room_id, ChatMsg(
+                role="assistant", content=msg,
+                sender_name=self.config.bot.name,
+                timestamp=time.time(),
+            ))
+            return msg
+
+        # 再来一次 → 重掷骰子
+        if self.game_manager.is_rerun_command(parsed.content):
+            session.touch()
+            return self._handle_dice(parsed)
+
+        # 其他消息：游戏模式中拦截，保持会话活跃
+        session.touch()
+        return None
 
     # ================================================================
     # 内部方法
